@@ -165,7 +165,7 @@
   {/if}
 
   {#if initialLoading}
-    <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3" aria-label={$t.gallery.loading}>
+    <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 2xl:grid-cols-6" aria-label={$t.gallery.loading}>
       {#each skeletonCards as _}
         <div class="overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950/45">
           <div class="aspect-square animate-pulse bg-zinc-800/60"></div>
@@ -195,7 +195,7 @@
         </div>
       {/if}
 
-      <div class={`grid gap-4 sm:grid-cols-2 lg:grid-cols-3 ${loading ? 'opacity-70' : ''}`}>
+      <div class={`grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 2xl:grid-cols-6 ${loading ? 'opacity-70' : ''}`}>
         {#each images as image, index (image.id)}
           <article class={`gallery-card overflow-hidden rounded-xl border ${selectedIds.has(image.id) ? 'border-emerald-400 bg-emerald-500/10' : 'border-zinc-800 bg-zinc-950/45'}`}>
             <button type="button" class="control-focus relative block aspect-square w-full bg-zinc-950" on:click={() => handleImageClick(image)}>

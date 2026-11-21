@@ -333,9 +333,10 @@
   onRetryJob={retryJob}
 />
 
-<main class="mx-auto max-w-5xl space-y-6 px-4 py-6 sm:px-6">
+<main class="mx-auto w-full max-w-none space-y-6 px-4 py-6 sm:px-6">
   <ToastHost toast={$uiStore.toast} />
 
+  <div class="grid grid-cols-1 items-start gap-6 lg:grid-cols-2">
   <PromptForm
     bind:form
     apiPath={$settingsStore.settings?.api_path || '/v1/images/generations'}
@@ -363,6 +364,7 @@
     onRegenerate={regenerate}
     onClear={clearPreview}
   />
+  </div>
 
   <GalleryGrid
     gallery={$galleryStore.gallery}
