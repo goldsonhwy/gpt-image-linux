@@ -5,6 +5,8 @@ import type { AccessStatus } from '$lib/api/types';
 
 export type AccessState = {
   authenticated: boolean;
+  registered: boolean;
+  username: string;
   loading: boolean;
   gateVisible: boolean;
   error: string;
@@ -12,6 +14,8 @@ export type AccessState = {
 
 const initialAccessState: AccessState = {
   authenticated: false,
+  registered: true,
+  username: '',
   loading: false,
   gateVisible: false,
   error: ''
@@ -19,6 +23,17 @@ const initialAccessState: AccessState = {
 
 function createAccessStore() {
   const { subscribe, set, update } = writable<AccessState>(initialAccessState);
+
+  function applyStatus(data: AccessStatus, gateVisible: boolean, error = '') {
+    update((state) => ({
+      ...state,
+      authenticated: data.authenticated,
+      registered: data.registered,
+      username: data.username || '',
+      gateVisible,
+      error
+    }));
+  }
 
   function setGateVisible(gateVisible: boolean, error = '') {
     update((state) => ({
@@ -33,39 +48,62 @@ function createAccessStore() {
     try {
       const data = await apiFetch<AccessStatus>('/api/access/status', {}, 'checking access');
       if (data.authenticated) {
-        setGateVisible(false);
+        applyStatus(data, false);
         await onAuthenticated();
         return;
       }
-      setGateVisible(true);
+      applyStatus(data, true);
     } catch (error) {
       setGateVisible(true, error instanceof Error ? error.message : get(t).messages.accessCheckFailed);
     }
   }
 
-  async function unlockAccess(accessKey: string, onAuthenticated: () => Promise<void>) {
+  async function submitCredentials(
+    path: string,
+    username: string,
+    password: string,
+    onAuthenticated: () => Promise<void>,
+    fallbackError: string
+  ) {
     update((state) => ({ ...state, loading: true, error: '' }));
     try {
       const data = await apiFetch<AccessStatus>(
-        '/api/access',
+        path,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ access_key: accessKey })
+          body: JSON.stringify({ username, password })
         },
-        'unlocking access'
+        'authenticating'
       );
-      if (!data.authenticated) throw new Error(get(t).messages.invalidAccessKey);
-      setGateVisible(false);
+      if (!data.authenticated) throw new Error(fallbackError);
+      applyStatus(data, false);
       await onAuthenticated();
     } catch (error) {
       update((state) => ({
         ...state,
-        error: error instanceof Error ? error.message : get(t).messages.invalidAccessKey
+        error: error instanceof Error ? error.message : fallbackError
       }));
     } finally {
       update((state) => ({ ...state, loading: false }));
     }
+  }
+
+  function register(username: string, password: string, onAuthenticated: () => Promise<void>) {
+    return submitCredentials('/api/access/register', username, password, onAuthenticated, get(t).messages.accessFailed);
+  }
+
+  function login(username: string, password: string, onAuthenticated: () => Promise<void>) {
+    return submitCredentials('/api/access/login', username, password, onAuthenticated, get(t).messages.invalidAccessKey);
+  }
+
+  async function logout() {
+    try {
+      await apiFetch<AccessStatus>('/api/access/logout', { method: 'POST' }, 'signing out');
+    } catch {
+      // ignore network errors; clear local state regardless
+    }
+    update((state) => ({ ...state, authenticated: false, gateVisible: true, username: '' }));
   }
 
   function installUnauthorizedHandler() {
@@ -78,7 +116,9 @@ function createAccessStore() {
     subscribe,
     set,
     checkAccess,
-    unlockAccess,
+    register,
+    login,
+    logout,
     installUnauthorizedHandler
   };
 }

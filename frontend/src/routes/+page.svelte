@@ -289,13 +289,22 @@
   <title>GPT Image Panel</title>
 </svelte:head>
 
-<AccessGate visible={$accessStore.gateVisible} error={$accessStore.error} loading={$accessStore.loading} onUnlock={(key) => accessStore.unlockAccess(key, loadInitialData)} />
+<AccessGate
+  visible={$accessStore.gateVisible}
+  error={$accessStore.error}
+  loading={$accessStore.loading}
+  registered={$accessStore.registered}
+  onRegister={(u, p) => accessStore.register(u, p, loadInitialData)}
+  onLogin={(u, p) => accessStore.login(u, p, loadInitialData)}
+/>
 <Header
   {version}
   {latestVersion}
   hasVersionUpdate={versionHasUpdate}
   {releaseUrl}
   {activeJobsCount}
+  username={$accessStore.username}
+  onLogout={() => void accessStore.logout()}
   onOpenJobs={openJobsDrawer}
   onOpenSettings={() => setUi('settingsOpen', true)}
 />

@@ -47,3 +47,14 @@ REVIEW.md
 AGENTS.md
 CODE_REVIEW.md
 PERFORMANCE_UX_AUDIT.md
+
+# Local build artifacts (PyInstaller)
+.venv/
+build/
+build2/
+build3/
+dist/
+dist_build2/
+dist_build3/
+版本快照-v2/
+*.zip

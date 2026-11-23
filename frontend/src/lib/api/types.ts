@@ -39,6 +39,8 @@ export type PresetHealthResponse = {
 
 export type AccessStatus = {
   authenticated: boolean;
+  registered?: boolean;
+  username?: string;
   expires_at?: string | null;
 };
 

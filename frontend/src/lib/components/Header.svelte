@@ -8,6 +8,8 @@
   export let releaseUrl: string | null = null;
   export let onOpenJobs: () => void = () => {};
   export let onOpenSettings: () => void = () => {};
+  export let onLogout: () => void = () => {};
+  export let username = '';
 
   $: versionTitle = hasVersionUpdate
     ? $t.header.versionUpdateTitle(version, latestVersion)
@@ -15,7 +17,7 @@
 </script>
 
 <header class="sticky top-0 z-40 border-b border-zinc-800 bg-zinc-950/80 backdrop-blur-md">
-  <div class="mx-auto flex max-w-5xl items-center justify-between px-4 py-4 sm:px-6">
+  <div class="mx-auto flex w-full items-center justify-between px-4 py-4 sm:px-6">
     <div class="flex items-center gap-3">
       <button
         type="button"
@@ -55,6 +57,18 @@
     </div>
 
     <div class="flex items-center gap-2">
+      {#if username}
+        <span class="hidden text-xs text-zinc-400 sm:inline" title={username}>{username}</span>
+        <button
+          type="button"
+          class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs font-medium text-zinc-300 transition-colors hover:bg-zinc-800 hover:text-zinc-100"
+          title={$t.access.logout}
+          aria-label={$t.access.logout}
+          on:click={onLogout}
+        >
+          {$t.access.logout}
+        </button>
+      {/if}
       <button
         type="button"
         class="control-focus relative rounded-lg p-2 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100"

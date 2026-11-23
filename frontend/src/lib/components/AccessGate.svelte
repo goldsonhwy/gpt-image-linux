@@ -4,19 +4,33 @@
   export let visible = false;
   export let error = '';
   export let loading = false;
-  export let onUnlock: (accessKey: string) => Promise<void> | void = () => {};
+  export let registered = true;
+  export let onRegister: (username: string, password: string) => Promise<void> | void = () => {};
+  export let onLogin: (username: string, password: string) => Promise<void> | void = () => {};
 
-  let accessKey = '';
+  let username = '';
+  let password = '';
+  let confirmPassword = '';
   let localError = '';
 
   async function submit() {
-    const value = accessKey.trim();
-    if (!value) {
+    const u = username.trim();
+    const p = password;
+    if (!u || !p) {
       localError = $t.access.required;
       return;
     }
+    if (!registered && p.length < 6) {
+      localError = $t.access.passwordTooShort;
+      return;
+    }
+    if (!registered && p !== confirmPassword) {
+      localError = $t.access.passwordMismatch;
+      return;
+    }
     localError = '';
-    await onUnlock(value);
+    if (registered) await onLogin(u, p);
+    else await onRegister(u, p);
   }
 </script>
 
@@ -36,22 +50,50 @@
       <div class="mb-5 flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-500/10">
         <span class="text-lg text-emerald-400">#</span>
       </div>
-      <h2 class="text-lg font-semibold text-zinc-100">{$t.access.title}</h2>
+      <h2 class="text-lg font-semibold text-zinc-100">{registered ? $t.access.title : $t.access.registerTitle}</h2>
+      <p class="mt-1 text-xs text-zinc-500">{registered ? $t.access.loginSubtitle : $t.access.subtitle}</p>
       <form class="mt-5 space-y-4" on:submit|preventDefault={submit}>
-        <input
-          bind:value={accessKey}
-          type="password"
-          autocomplete="current-password"
-          aria-label={$t.access.title}
-          placeholder={$t.access.placeholder}
-          class="control-focus w-full rounded-xl border border-zinc-700 bg-zinc-800 px-4 py-3 font-mono text-sm text-zinc-100 transition-colors placeholder-zinc-500 focus:border-emerald-500"
-        />
+        <label class="block">
+          <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.access.username}</span>
+          <input
+            bind:value={username}
+            type="text"
+            autocomplete="username"
+            aria-label={$t.access.username}
+            placeholder={$t.access.usernamePlaceholder}
+            class="control-focus w-full rounded-xl border border-zinc-700 bg-zinc-800 px-4 py-3 text-sm text-zinc-100 transition-colors placeholder-zinc-500 focus:border-emerald-500"
+          />
+        </label>
+        <label class="block">
+          <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.access.password}</span>
+          <input
+            bind:value={password}
+            type="password"
+            autocomplete={registered ? 'current-password' : 'new-password'}
+            aria-label={$t.access.password}
+            placeholder={$t.access.passwordPlaceholder}
+            class="control-focus w-full rounded-xl border border-zinc-700 bg-zinc-800 px-4 py-3 font-mono text-sm text-zinc-100 transition-colors placeholder-zinc-500 focus:border-emerald-500"
+          />
+        </label>
+        {#if !registered}
+          <label class="block">
+            <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.access.confirmPassword}</span>
+            <input
+              bind:value={confirmPassword}
+              type="password"
+              autocomplete="new-password"
+              aria-label={$t.access.confirmPassword}
+              placeholder={$t.access.confirmPlaceholder}
+              class="control-focus w-full rounded-xl border border-zinc-700 bg-zinc-800 px-4 py-3 font-mono text-sm text-zinc-100 transition-colors placeholder-zinc-500 focus:border-emerald-500"
+            />
+          </label>
+        {/if}
         <button
           type="submit"
           disabled={loading}
           class="control-focus w-full rounded-xl bg-emerald-600 px-4 py-3 text-sm font-semibold text-white transition-colors hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {loading ? $t.access.unlocking : $t.access.unlock}
+          {loading ? $t.access.unlocking : registered ? $t.access.login : $t.access.register}
         </button>
       </form>
       {#if error || localError}

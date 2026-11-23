@@ -85,8 +85,20 @@ class AccessRequest(BaseModel):
     access_key: str = Field(..., min_length=1, description="Access key for site access")
 
 
+class RegisterRequest(BaseModel):
+    username: str = Field(..., min_length=1, max_length=64, description="Admin username")
+    password: str = Field(..., min_length=6, max_length=256, description="Admin password")
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(..., min_length=1, max_length=64, description="Admin username")
+    password: str = Field(..., min_length=1, max_length=256, description="Admin password")
+
+
 class AccessStatusResponse(BaseModel):
     authenticated: bool
+    registered: bool = False
+    username: str = ""
     expires_at: Optional[str] = None
 
 

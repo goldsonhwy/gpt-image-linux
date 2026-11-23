@@ -38,11 +38,11 @@ def cleanup_stale_edit_source_files():
 async def lifespan(app: FastAPI):
     from . import jobs, presets
 
-    if not config.ACCESS_KEY and not config.ALLOW_UNAUTHENTICATED:
-        raise RuntimeError(
-            "ACCESS_KEY is required. Set ACCESS_KEY, or set "
-            "ALLOW_UNAUTHENTICATED=true to explicitly run without authentication."
-        )
+    # Authentication is now self-managed: the first visitor registers an admin
+    # account, so no deployment-time ACCESS_KEY is required.
+    from ..core import accounts as _accounts
+    if not _accounts.is_registered():
+        logger.info("No admin account yet. Open the page to register the first admin.")
 
     Path(config.IMAGES_DIR).mkdir(parents=True, exist_ok=True)
     Path(config.THUMBNAILS_DIR).mkdir(parents=True, exist_ok=True)

@@ -2,6 +2,7 @@ import base64
 import hmac
 import ipaddress
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from typing import Optional
@@ -12,9 +13,12 @@ from . import settings as config
 
 
 def _signature_secret() -> bytes:
-    key = config.ACCESS_KEY or config.DEFAULT_API_KEY
+    # Session tokens must survive changes to the API preset/access key, so they
+    # use a dedicated secret. Set SESSION_SECRET in production to keep sessions
+    # valid across process restarts on hosts without a persisted secret.
+    key = os.getenv("SESSION_SECRET", "").strip()
     if not key:
-        key = "gpt-image-panel-dev-secret"
+        key = "gpt-image-panel-session-secret-v1"
     return key.encode("utf-8")
 
 
@@ -27,10 +31,16 @@ def _base64url_decode(value: str) -> bytes:
     return base64.urlsafe_b64decode((value + padding).encode("ascii"))
 
 
+def session_days() -> int:
+    """Session lifetime in days. Defaults to 10 years (effectively unlimited)."""
+    try:
+        return max(1, int(os.getenv("SESSION_DAYS", "3650")))
+    except ValueError:
+        return 3650
+
+
 def create_access_token() -> tuple[str, datetime]:
-    expires_at = datetime.now(timezone.utc) + timedelta(
-        minutes=config.ACCESS_KEY_SESSION_MINUTES
-    )
+    expires_at = datetime.now(timezone.utc) + timedelta(days=session_days())
     payload = {"exp": int(expires_at.timestamp())}
     payload_raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     payload_part = _base64url_encode(payload_raw)

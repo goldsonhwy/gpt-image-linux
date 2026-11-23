@@ -47,11 +47,24 @@ const en = {
     versionUpdateTitle: (version: string, latestVersion: string) => `Current ${version}. Latest v${latestVersion}.`
   },
   access: {
-    title: 'Access Key',
-    placeholder: 'Enter access key',
-    unlock: 'Unlock',
-    unlocking: 'Unlocking...',
-    required: 'Please enter the access key'
+    title: 'Sign in',
+    registerTitle: 'Create admin account',
+    subtitle: 'First time here? Set a username and password to get started.',
+    loginSubtitle: 'Sign in with your admin account.',
+    username: 'Username',
+    password: 'Password',
+    confirmPassword: 'Confirm password',
+    usernamePlaceholder: 'Enter username',
+    passwordPlaceholder: 'Enter password',
+    confirmPlaceholder: 'Re-enter password',
+    register: 'Create account',
+    registerWorking: 'Creating...',
+    login: 'Sign in',
+    unlocking: 'Signing in...',
+    required: 'Please enter username and password',
+    passwordMismatch: 'Passwords do not match',
+    passwordTooShort: 'Password must be at least 6 characters',
+    logout: 'Sign out'
   },
   settings: {
     title: 'Settings',
@@ -172,7 +185,8 @@ const en = {
   },
   messages: {
     accessCheckFailed: 'Access check failed',
-    invalidAccessKey: 'Invalid access key',
+    accessFailed: 'Could not create account',
+    invalidAccessKey: 'Invalid username or password',
     apiUrlRequired: 'Please enter an API URL',
     apiKeyRequired: 'Please enter an API Key',
     presetSaved: 'Preset saved',
@@ -299,11 +313,24 @@ const zh: TranslationSchema<typeof en> = {
     versionUpdateTitle: (version, latestVersion) => `当前 ${version}，最新 v${latestVersion}。`
   },
   access: {
-    title: '访问密钥',
-    placeholder: '输入访问密钥',
-    unlock: '解锁',
-    unlocking: '解锁中...',
-    required: '请输入访问密钥'
+    title: '登录',
+    registerTitle: '创建管理员账户',
+    subtitle: '首次使用？设置用户名和密码即可开始，无需激活码。',
+    loginSubtitle: '使用管理员账户登录。',
+    username: '用户名',
+    password: '密码',
+    confirmPassword: '确认密码',
+    usernamePlaceholder: '请输入用户名',
+    passwordPlaceholder: '请输入密码',
+    confirmPlaceholder: '请再次输入密码',
+    register: '创建账户',
+    registerWorking: '创建中...',
+    login: '登录',
+    unlocking: '登录中...',
+    required: '请输入用户名和密码',
+    passwordMismatch: '两次密码不一致',
+    passwordTooShort: '密码至少 6 位',
+    logout: '退出登录'
   },
   settings: {
     title: '设置',
@@ -424,7 +451,8 @@ const zh: TranslationSchema<typeof en> = {
   },
   messages: {
     accessCheckFailed: '访问状态检查失败',
-    invalidAccessKey: '访问密钥无效',
+    accessFailed: '创建账户失败',
+    invalidAccessKey: '用户名或密码错误',
     apiUrlRequired: '请输入 API URL',
     apiKeyRequired: '请输入 API 密钥',
     presetSaved: '预设已保存',

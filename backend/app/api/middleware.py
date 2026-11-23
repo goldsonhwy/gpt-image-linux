@@ -4,6 +4,7 @@ from fastapi import Request, Response
 from fastapi.responses import JSONResponse
 
 from .csp import CONTENT_SECURITY_POLICY
+from ..core import accounts
 from ..core import security as auth
 from ..core import settings as config
 
@@ -12,6 +13,9 @@ AUTH_EXEMPT_PATHS = {
     "/",
     "/api/access",
     "/api/access/status",
+    "/api/access/register",
+    "/api/access/login",
+    "/api/access/logout",
     "/api/version",
     "/api/version/latest",
     "/favicon.ico",
@@ -124,7 +128,7 @@ def register_middleware(app):
             )
 
         if (
-            config.ACCESS_KEY
+            accounts.is_registered()
             and request.url.path not in AUTH_EXEMPT_PATHS
             and not request.url.path.startswith(AUTH_EXEMPT_PREFIXES)
         ):
@@ -133,7 +137,7 @@ def register_middleware(app):
                 return apply_security_headers(
                     JSONResponse(
                         status_code=401,
-                        content={"status": "error", "detail": "Access key required"},
+                        content={"status": "error", "detail": "Login required"},
                     )
                 )
 
