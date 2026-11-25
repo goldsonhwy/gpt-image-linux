@@ -433,11 +433,15 @@ main(){
   if read_choice; then
     :
   else
-    if [ "$CHOICE" = "" ]; then
-      echo "无交互终端, 无法选择。本次【默认安装】。若需卸载: MODE=uninstall 重跑。"
-      CHOICE="install"
+    if [ -n "${MODE:-}" ]; then
+      echo "采用选择: $MODE (来自 MODE 环境变量)"
+      CHOICE="$MODE"
+    else
+      echo "未收到有效选择 (1/2)。为防误操作, 不自动安装。"
+      echo "  请重新运行并输入 1 (安装) 或 2 (卸载);"
+      echo "  或无交互场景用: MODE=install 安装 / MODE=uninstall 卸载。"
+      exit 1
     fi
-    echo "采用选择: $CHOICE"
   fi
   case "$CHOICE" in
     1|install) do_install ;;
