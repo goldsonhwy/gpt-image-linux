@@ -33,29 +33,44 @@ if [ "$need_docker" = 1 ]; then
   apt-get install -y ca-certificates curl gnupg lsb-release
   install -m 0755 -d /etc/apt/keyrings
   DIST="$(. /etc/os-release && echo "$ID")"; CODENAME="$(. /etc/os-release && echo "$VERSION_CODENAME")"
+  ARCH="$(dpkg --print-architecture)"
   # 下载官方 GPG key (armored)
   curl -fsSL "https://download.docker.com/linux/$DIST/gpg" -o /etc/apt/keyrings/docker.asc
   chmod a+r /etc/apt/keyrings/docker.asc
-  # 同时生成 dearmor 版 .gpg (部分 apt 版本/全新机只认二进制)
+  # 同时生成 dearmor 版 .gpg (部分 apt/全新机只认二进制)
   gpg --dearmor -o /etc/apt/keyrings/docker.gpg /etc/apt/keyrings/docker.asc 2>/dev/null || true
-  # 优先用 dearmor 二进制 .gpg (兼容性最好); 没有才退回 .asc
-  if [ -s /etc/apt/keyrings/docker.gpg ]; then KEYREF=/etc/apt/keyrings/docker.gpg; else KEYREF=/etc/apt/keyrings/docker.asc; fi
-  echo "deb [arch=$(dpkg --print-architecture) signed-by=$KEYREF] \
-https://download.docker.com/linux/$DIST $CODENAME stable" > /etc/apt/sources.list.d/docker.list
-  # 更新; 若验签仍 NO_PUBKEY, 自愈: 换另一种 key 格式再试; 再不行则放行装好 docker
-  if ! apt-get update -y 2>&1; then
-    warn "Docker 仓库验签失败 (NO_PUBKEY), 尝试自愈 ..."
-    # 换另一种 key 格式再试
-    ALT=/etc/apt/keyrings/docker.asc; [ -s /etc/apt/keyrings/docker.gpg ] && ALT=/etc/apt/keyrings/docker.gpg
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=$ALT] \
-https://download.docker.com/linux/$DIST $CODENAME stable" > /etc/apt/sources.list.d/docker.list
-    if ! apt-get update -y 2>&1; then
-      warn "仍失败, 临时放行不验签安装 docker (装好后会重新验签) ..."
-      apt-get update -y -o Acquire::AllowInsecureRepositories=true || true
-    fi
+
+  # 验签探测: 写 .list, 跑 apt update, 抓输出判断 NO_PUBKEY (apt update 部分失败仍退0, 必须看输出)
+  try_docker_repo(){  # $1=signed-by 路径
+    echo "deb [arch=$ARCH signed-by=$1] https://download.docker.com/linux/$DIST $CODENAME stable" > /etc/apt/sources.list.d/docker.list
+    local out
+    out="$(apt-get update -y 2>&1 || true)"
+    if echo "$out" | grep -q "NO_PUBKEY"; then return 1; fi
+    if echo "$out" | grep -qE "download\.docker\.com.*$CODENAME|docker.*InRelease"; then return 0; fi
+    # 没看到 docker 仓库任何行 -> 当成功 (key 有效但仓库被 skip 的情况)
+    echo "$out" | grep -q "W: GPG error\|E: The repository" && return 1 || true
+    return 0
+  }
+
+  ok=0
+  # 1) 先试 dearmor 二进制 .gpg
+  if [ -s /etc/apt/keyrings/docker.gpg ] && try_docker_repo /etc/apt/keyrings/docker.gpg; then
+    ok=1; log "Docker key (.gpg) 验签通过。"
   fi
+  # 2) 退回 armored .asc
+  if [ "$ok" = 0 ] && try_docker_repo /etc/apt/keyrings/docker.asc; then
+    ok=1; log "Docker key (.asc) 验签通过。"
+  fi
+  # 3) 都失败 (key 不匹配/下载损坏) -> 放行不验签装好 docker, 装好后 apt 已缓存可再严格 update
+  if [ "$ok" = 0 ]; then
+    warn "Docker 仓库 GPG 验签仍失败, 临时放行不验签安装 (装好后会重新验签) ..."
+    echo "deb [arch=$ARCH] https://download.docker.com/linux/$DIST $CODENAME stable" > /etc/apt/sources.list.d/docker.list
+    apt-get update -y -o Acquire::AllowInsecureRepositories=true 2>/dev/null || true
+    warn "提示: 为安全请在装好 docker 后执行:  apt-get update  (若再报 NO_PUBKEY, 删除 /etc/apt/sources.list.d/docker.list 并手动加 docker 源)"
+  fi
+
   apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-  # 装好后恢复严格验签 (重新 update 一次, 此时 docker 的 key 已被 apt 缓存认可)
+  # 装好后恢复严格验签 (重新 update, 此时 apt 已缓存 docker key)
   apt-get update -y >/dev/null 2>&1 || true
   systemctl enable --now docker
 else
@@ -167,10 +182,10 @@ done
 DOMAIN="$(grep -E '^DOMAIN=' .env | cut -d= -f2 || echo "")"
 if [ -n "$DOMAIN" ]; then
   log "配置反向代理 https://$DOMAIN -> 127.0.0.1:$PORT ..."
-  # 5a. 检测已装反代: caddy 优先, 其次 nginx
+  # 5a. 检测已装反代: caddy 优先, 其次 nginx (if 包裹, 防 set -e 在检测不到时崩)
   RP=""
-  command -v caddy >/dev/null 2>&1 && RP="caddy"
-  [ -z "$RP" ] && command -v nginx >/dev/null 2>&1 && RP="nginx"
+  if command -v caddy >/dev/null 2>&1; then RP="caddy"; fi
+  if [ -z "$RP" ] && command -v nginx >/dev/null 2>&1; then RP="nginx"; fi
   # 5b. 都没 -> 安装 caddy (官方源, 自动 Let's Encrypt)
   if [ -z "$RP" ]; then
     log "未检测到 caddy/nginx, 安装 caddy ..."
