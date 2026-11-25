@@ -178,14 +178,21 @@ else
   DOMAIN="${DOMAIN#http://}"; DOMAIN="${DOMAIN#https://}"; DOMAIN="${DOMAIN%/}"
   ACCESS_KEY=""
   if [ -t 0 ]; then
-    read -r -p "访问密钥 ACCESS_KEY (默认留空=首次进面板自行设置密码; 直接回车跳过): " ACCESS_KEY || true
+    read -r -p "访问密钥 ACCESS_KEY (默认留空=无密码直接进面板; 想登录保护就填一个, 如 123): " ACCESS_KEY || true
   fi
   # 生成 .env (仅覆盖 compose 实际用到的关键项; 其余用镜像默认值)
   # 访问密码: 默认留空 -> 面板首次进入时【自行设置密码】(你的需求)
   #          手动填了 -> 直接锁定该密码, 不再首次自设
   {
     echo "GRANIAN_PORT=${PORT}"
-    [ -n "$ACCESS_KEY" ] && echo "ACCESS_KEY=${ACCESS_KEY}" || echo "ACCESS_KEY="
+    if [ -n "$ACCESS_KEY" ]; then
+      echo "ACCESS_KEY=${ACCESS_KEY}"
+    else
+      # 留空 = 不设密钥; 但面板要求"有 ACCESS_KEY 或 ALLOW_UNAUTHENTICATED=true", 否则 worker 崩
+      # 故留空时显式 ALLOW_UNAUTHENTICATED=*** (无密码直接进; 面板里可在设置里再设密钥)
+      echo "ACCESS_KEY="
+      echo "ALLOW_UNAUTHENTICATED=***"
+    fi
     echo "DOMAIN=${DOMAIN}"
     # 登录 cookie 的 Secure 属性必须匹配实际协议: 有域名(HTTPS)=true, 无域名(HTTP直连)=false
     # 否则 HTTP 直连时 Secure cookie 设不上, 填对密码也登不进
@@ -203,7 +210,7 @@ else
   if [ -n "$ACCESS_KEY" ]; then
     log "已设访问密钥: ${ACCESS_KEY:0:4}... (登录面板用它)"
   else
-    log "访问密钥留空 -> 首次打开面板时按提示自行设置密码"
+    log "访问密钥留空 -> 无密码直接进面板 (已放行 ALLOW_UNAUTHENTICATED)"
   fi
 fi
 
@@ -236,7 +243,13 @@ EOF
 fi
 # .env 兜底 (缺项补默认)
 grep -q '^GRANIAN_PORT=' .env 2>/dev/null || echo "GRANIAN_PORT=${PORT:-8091}" >> .env
-grep -q '^ACCESS_KEY='  .env 2>/dev/null || echo "ACCESS_KEY=${ACCESS_KEY:-}" >> .env
+grep -q '^ACCESS_KEY='  .env 2>/dev/null || echo "ACCESS_KEY=" >> .env
+# 面板启动要求"有 ACCESS_KEY 或 ALLOW_UNAUTHENTICATED=true", 否则 worker 崩
+# 故若既没密钥又没显式放行, 补 ALLOW_UNAUTHENTICATED=*** (无密码直接进)
+if ! grep -qE '^ACCESS_KEY=.' .env 2>/dev/null && ! grep -q '^ALLOW_UNAUTHENTICATED=' .env 2>/dev/null; then
+  echo "ALLOW_UNAUTHENTICATED=***" >> .env
+  log ".env 无密钥且未放行, 已补 ALLOW_UNAUTHENTICATED=*** (无密码直接进)"
+fi
 
 # 拉镜像
 log "拉取镜像 $IMAGE ..."
@@ -355,7 +368,7 @@ printf '\033[1;32m本机:      http://127.0.0.1:%s\033[0m\n' "$PORT"
 if [ -n "$ACCESS_KEY" ]; then
   printf '访问密钥:  %s  (用它在面板登录)\n' "$ACCESS_KEY"
 else
-  printf '访问密钥:  (未设) -> 首次打开面板时按提示自行设置密码\n'
+  printf '访问密钥:  (未设) -> 无密码直接进面板 (如需登录保护, 面板里设置密钥或改 .env ACCESS_KEY)\n'
 fi
 printf '容器名:    %s   |   镜像: %s\n' "$SERVICE_NAME" "$IMAGE"
 printf '安装目录:  %s\n' "$INSTALL_DIR"
