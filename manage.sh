@@ -29,6 +29,22 @@ err(){  printf '\033[1;31m[错误]\033[0m %s\n' "$*" >&2; }
 run(){  # 卸载用: DRY 只打印
   if [ "$DRY" = 1 ]; then printf '  [DRY] %s\n' "$*"; else "$@"; fi
 }
+# 交互读一行: 有 /dev/tty (含 curl|bash 场景) 就停下等用户; 无终端则取默认 $2
+HAS_TTY=0; [ -t 0 ] || [ -t /dev/tty ] && HAS_TTY=1
+ask(){  # $1=提示 $2=默认值 -> 结果写全局 _ANS
+  local prompt="$1" def="${2-}"
+  if [ "$HAS_TTY" = 1 ]; then
+    if [ -t 0 ]; then
+      read -r -p "$prompt" _ANS || _ANS=""
+    else
+      printf '%s' "$prompt" >/dev/tty
+      read -r _ANS </dev/tty || _ANS=""
+    fi
+    [ -n "$_ANS" ] || _ANS="$def"
+  else
+    _ANS="$def"
+  fi
+}
 
 # ================================================================ 安装
 do_install(){
@@ -73,9 +89,9 @@ do_install(){
   echo
 
   DO_INSTALL=1
-  if [ -t 0 ] && [ "$AUTO_NO" != 1 ]; then
-    read -r -p "开始安装? 回车继续 / 输 n 取消: " ANS || ANS=""
-    case "$ANS" in n|N) DO_INSTALL=0 ;; *) DO_INSTALL=1 ;; esac
+  if [ "$AUTO_NO" != 1 ]; then
+    ask "开始安装? 回车继续 / 输 n 取消: " ""
+    case "$_ANS" in n|N) DO_INSTALL=0 ;; *) DO_INSTALL=1 ;; esac
   fi
   if [ "$DO_INSTALL" != 1 ]; then
     warn "已取消, 未安装任何东西。"; exit 0
@@ -151,17 +167,13 @@ do_install(){
   else
     mkdir -p "$INSTALL_DIR"
     DEFAULT_PORT=8091
-    read -r -p "监听端口 [默认 $DEFAULT_PORT]: " PORT || true
-    PORT="${PORT:-$DEFAULT_PORT}"; PORT="${PORT//[^0-9]/}"; [ -n "$PORT" ] || PORT="$DEFAULT_PORT"
-    DOMAIN=""
-    if [ -t 0 ]; then
-      read -r -p "域名 (回车=跳过; 填了将自动 HTTPS 反代): " DOMAIN || true
-    fi
+    ask "监听端口 [默认 $DEFAULT_PORT]: " "$DEFAULT_PORT"
+    PORT="$_ANS"; PORT="${PORT//[^0-9]/}"; [ -n "$PORT" ] || PORT="$DEFAULT_PORT"
+    ask "域名 (回车=跳过; 填了将自动 HTTPS 反代): " ""
+    DOMAIN="$_ANS"
     DOMAIN="${DOMAIN#http://}"; DOMAIN="${DOMAIN#https://}"; DOMAIN="${DOMAIN%/}"
-    ACCESS_KEY=""
-    if [ -t 0 ]; then
-      read -r -p "访问密钥 ACCESS_KEY (默认留空=首次进面板自行设置密码; 直接回车跳过): " ACCESS_KEY || true
-    fi
+    ask "访问密钥 ACCESS_KEY (默认留空=首次进面板自行设置密码; 直接回车跳过): " ""
+    ACCESS_KEY="$_ANS"
     {
       echo "GRANIAN_PORT=${PORT}"
       [ -n "$ACCESS_KEY" ] && echo "ACCESS_KEY=${ACCESS_KEY}" || echo "ACCESS_KEY="
@@ -399,10 +411,14 @@ main(){
   echo "============================================"
   echo "  1) 安装"
   echo "  2) 卸载"
+  # 交互读选择: 有终端(含 curl|bash 经 /dev/tty)就停下等 1/2; 完全无终端才默认
   if [ -t 0 ]; then
     read -r -p "请选择 (1 安装 / 2 卸载): " CHOICE || CHOICE=""
+  elif [ -t /dev/tty ]; then
+    printf '请选择 (1 安装 / 2 卸载): ' >/dev/tty
+    read -r CHOICE </dev/tty || CHOICE=""
   else
-    # 非交互: 默认安装; MODE=uninstall 走卸载
+    # 完全非交互 (无终端): 默认安装, MODE=uninstall 走卸载
     CHOICE="${MODE:-install}"
   fi
   case "$CHOICE" in
