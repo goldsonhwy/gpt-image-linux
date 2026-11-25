@@ -6,6 +6,14 @@
 ![SQLite](https://img.shields.io/badge/SQLite-3-003B57?logo=sqlite)
 ![Docker](https://img.shields.io/badge/Docker-24.0+-2496ED?logo=docker)
 
+## 一键部署（Debian/Ubuntu，无需反代）
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/goldsonhwy/gpt-image-linux/main/install.sh | bash
+```
+
+> 脚本自动：装 Docker 与系统依赖 → 提示端口 + 访问密钥 → 拉镜像起容器 → 打印 `http://服务器IP:端口`。脚本在 [`install.sh`](install.sh)。
+
 ## 本 fork 相比原版的改动（gima 版）
 
 > 本仓库 fork 自 [原版 GPT Image Panel](https://github.com/Z1rconium/gpt-image-panel)（上游：Z1rconium/gpt-image-panel）。原版的功能与用法见其 README；以下是本 fork 在原版基础上额外做的修改。
