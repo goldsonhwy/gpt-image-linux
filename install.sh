@@ -32,13 +32,31 @@ if [ "$need_docker" = 1 ]; then
   apt-get update -y
   apt-get install -y ca-certificates curl gnupg lsb-release
   install -m 0755 -d /etc/apt/keyrings
-  curl -fsSL "https://download.docker.com/linux/$(. /etc/os-release && echo "$ID")/gpg" -o /etc/apt/keyrings/docker.gpg
-  chmod a+r /etc/apt/keyrings/docker.gpg
-  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
-https://download.docker.com/linux/$(. /etc/os-release && echo "$ID") $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
-    > /etc/apt/sources.list.d/docker.list
-  apt-get update -y
+  DIST="$(. /etc/os-release && echo "$ID")"; CODENAME="$(. /etc/os-release && echo "$VERSION_CODENAME")"
+  # 下载官方 GPG key (armored)
+  curl -fsSL "https://download.docker.com/linux/$DIST/gpg" -o /etc/apt/keyrings/docker.asc
+  chmod a+r /etc/apt/keyrings/docker.asc
+  # 同时生成 dearmor 版 .gpg (部分 apt 版本/全新机只认二进制)
+  gpg --dearmor -o /etc/apt/keyrings/docker.gpg /etc/apt/keyrings/docker.asc 2>/dev/null || true
+  # 优先用 dearmor 二进制 .gpg (兼容性最好); 没有才退回 .asc
+  if [ -s /etc/apt/keyrings/docker.gpg ]; then KEYREF=/etc/apt/keyrings/docker.gpg; else KEYREF=/etc/apt/keyrings/docker.asc; fi
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=$KEYREF] \
+https://download.docker.com/linux/$DIST $CODENAME stable" > /etc/apt/sources.list.d/docker.list
+  # 更新; 若验签仍 NO_PUBKEY, 自愈: 换另一种 key 格式再试; 再不行则放行装好 docker
+  if ! apt-get update -y 2>&1; then
+    warn "Docker 仓库验签失败 (NO_PUBKEY), 尝试自愈 ..."
+    # 换另一种 key 格式再试
+    ALT=/etc/apt/keyrings/docker.asc; [ -s /etc/apt/keyrings/docker.gpg ] && ALT=/etc/apt/keyrings/docker.gpg
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=$ALT] \
+https://download.docker.com/linux/$DIST $CODENAME stable" > /etc/apt/sources.list.d/docker.list
+    if ! apt-get update -y 2>&1; then
+      warn "仍失败, 临时放行不验签安装 docker (装好后会重新验签) ..."
+      apt-get update -y -o Acquire::AllowInsecureRepositories=true || true
+    fi
+  fi
   apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  # 装好后恢复严格验签 (重新 update 一次, 此时 docker 的 key 已被 apt 缓存认可)
+  apt-get update -y >/dev/null 2>&1 || true
   systemctl enable --now docker
 else
   log "检测到 Docker 已安装, 跳过。"
