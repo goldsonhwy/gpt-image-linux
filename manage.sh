@@ -411,15 +411,33 @@ main(){
   echo "============================================"
   echo "  1) 安装"
   echo "  2) 卸载"
-  # 交互读选择: 有终端(含 curl|bash 经 /dev/tty)就停下等 1/2; 完全无终端才默认
-  if [ -t 0 ]; then
-    read -r -p "请选择 (1 安装 / 2 卸载): " CHOICE || CHOICE=""
-  elif [ -t /dev/tty ]; then
-    printf '请选择 (1 安装 / 2 卸载): ' >/dev/tty
-    read -r CHOICE </dev/tty || CHOICE=""
+  # 交互读选择: 尽量停下等 1/2; 完全无终端才默认(并大声告知)
+  read_choice(){
+    local tries=3 c
+    while [ $tries -gt 0 ]; do
+      if [ -t 0 ]; then
+        read -r -p "请选择 (1 安装 / 2 卸载): " c || c=""
+      elif [ -e /dev/tty ] && [ -r /dev/tty ]; then
+        printf '请选择 (1 安装 / 2 卸载): ' >/dev/tty
+        read -r c </dev/tty || c=""
+      else
+        break
+      fi
+      case "$c" in 1|install|2|uninstall) CHOICE="$c"; return 0 ;; esac
+      tries=$((tries-1))
+      printf "输入无效, 请输 1 或 2。\n" >/dev/tty 2>/dev/null || true
+    done
+    if [ -n "${MODE:-}" ]; then CHOICE="$MODE"; else CHOICE=""; fi
+    return 1
+  }
+  if read_choice; then
+    :
   else
-    # 完全非交互 (无终端): 默认安装, MODE=uninstall 走卸载
-    CHOICE="${MODE:-install}"
+    if [ "$CHOICE" = "" ]; then
+      echo "无交互终端, 无法选择。本次【默认安装】。若需卸载: MODE=uninstall 重跑。"
+      CHOICE="install"
+    fi
+    echo "采用选择: $CHOICE"
   fi
   case "$CHOICE" in
     1|install) do_install ;;
