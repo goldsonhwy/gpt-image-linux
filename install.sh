@@ -14,6 +14,9 @@
 #
 set -euo pipefail
 
+# 任何未捕获错误: 打印中文原因后退出 (避免 set -e 静默终止, 让用户在 ssh 界面看懂卡在哪)
+trap 'rc=$?; echo; echo "\033[1;31m[部署中断]\033[0m 第 $LINENO 行出错 (退出码 $rc)。" >&2; echo "若属 GPG/NO_PUBKEY 类, 见上方提示; 否则查上方最近的 [错误]/[注意] 行。" >&2' ERR
+
 IMAGE="ghcr.io/z1rconium/gpt-image-linux:v2.0.0"
 INSTALL_DIR="$HOME/gpt-image-panel"
 SERVICE_NAME="gpt-image-panel"
@@ -29,13 +32,17 @@ need_docker=0;  command -v docker >/dev/null 2>&1 || need_docker=1
 
 if [ "$need_docker" = 1 ]; then
   log "安装 Docker (官方仓库) ..."
-  apt-get update -y
-  apt-get install -y ca-certificates curl gnupg lsb-release
+  apt-get update -y || warn "apt-get update 有告警 (可能个别源 GPG 失败), 继续 ..."
+  apt-get install -y ca-certificates curl gnupg lsb-release || warn "基础依赖安装失败: 检查网络/源配置"
   install -m 0755 -d /etc/apt/keyrings
   DIST="$(. /etc/os-release && echo "$ID")"; CODENAME="$(. /etc/os-release && echo "$VERSION_CODENAME")"
   ARCH="$(dpkg --print-architecture)"
   # 下载官方 GPG key (armored)
-  curl -fsSL "https://download.docker.com/linux/$DIST/gpg" -o /etc/apt/keyrings/docker.asc
+  if ! curl -fsSL "https://download.docker.com/linux/$DIST/gpg" -o /etc/apt/keyrings/docker.asc; then
+    err "无法下载 Docker GPG key (原因: 网络不通或 download.docker.com 被墙/代理拦截)。"
+    err "排查: 1) 服务器能否访问外网  2) 是否有代理需配置 http_proxy  3) 重试 curl -I https://download.docker.com"
+    exit 1
+  fi
   chmod a+r /etc/apt/keyrings/docker.asc
   # 同时生成 dearmor 版 .gpg (部分 apt/全新机只认二进制)
   gpg --dearmor -o /etc/apt/keyrings/docker.gpg /etc/apt/keyrings/docker.asc 2>/dev/null || true
@@ -47,7 +54,6 @@ if [ "$need_docker" = 1 ]; then
     out="$(apt-get update -y 2>&1 || true)"
     if echo "$out" | grep -q "NO_PUBKEY"; then return 1; fi
     if echo "$out" | grep -qE "download\.docker\.com.*$CODENAME|docker.*InRelease"; then return 0; fi
-    # 没看到 docker 仓库任何行 -> 当成功 (key 有效但仓库被 skip 的情况)
     echo "$out" | grep -q "W: GPG error\|E: The repository" && return 1 || true
     return 0
   }
@@ -55,24 +61,29 @@ if [ "$need_docker" = 1 ]; then
   ok=0
   # 1) 先试 dearmor 二进制 .gpg
   if [ -s /etc/apt/keyrings/docker.gpg ] && try_docker_repo /etc/apt/keyrings/docker.gpg; then
-    ok=1; log "Docker key (.gpg) 验签通过。"
+    ok=1; log "Docker GPG key (.gpg 二进制) 验签通过。"
   fi
   # 2) 退回 armored .asc
   if [ "$ok" = 0 ] && try_docker_repo /etc/apt/keyrings/docker.asc; then
-    ok=1; log "Docker key (.asc) 验签通过。"
+    ok=1; log "Docker GPG key (.asc armored) 验签通过。"
   fi
-  # 3) 都失败 (key 不匹配/下载损坏) -> 放行不验签装好 docker, 装好后 apt 已缓存可再严格 update
+  # 3) 都失败 -> 放行不验签装好 docker (NO_PUBKEY 通常是 Docker 换 key 或 key 文件不完整; 放行可先装, 装后重新验签)
   if [ "$ok" = 0 ]; then
-    warn "Docker 仓库 GPG 验签仍失败, 临时放行不验签安装 (装好后会重新验签) ..."
+    warn "Docker 仓库 GPG 验签失败 (NO_PUBKEY)。"
+    warn "原因: apt 缺少 Docker 签名公钥 / key 文件与 InRelease 不匹配 / Docker 换了签名 key。"
+    warn "处理: 本次先【临时放行不验签】装好 docker (安全: docker-ce 包体另有 SHA512 校验)。"
     echo "deb [arch=$ARCH] https://download.docker.com/linux/$DIST $CODENAME stable" > /etc/apt/sources.list.d/docker.list
-    apt-get update -y -o Acquire::AllowInsecureRepositories=true 2>/dev/null || true
-    warn "提示: 为安全请在装好 docker 后执行:  apt-get update  (若再报 NO_PUBKEY, 删除 /etc/apt/sources.list.d/docker.list 并手动加 docker 源)"
+    apt-get update -y -o Acquire::AllowInsecureRepositories=true 2>/dev/null || warn "放行后 apt 更新仍有告警 (见上), 继续尝试安装 ..."
   fi
 
-  apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  if ! apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; then
+    err "Docker 安装失败 (原因: 上述 apt 步骤某处报错, 可能放行后网络仍不稳或仓库被禁)。"
+    err "排查: 手动跑 'apt-get install -y docker-ce' 看完整报错; 或确认该机器 distro=$DIST/$CODENAME 受支持。"
+    exit 1
+  fi
   # 装好后恢复严格验签 (重新 update, 此时 apt 已缓存 docker key)
   apt-get update -y >/dev/null 2>&1 || true
-  systemctl enable --now docker
+  systemctl enable --now docker || warn "docker 服务启动失败: 请手动 'systemctl enable --now docker' 并查 'journalctl -u docker'"
 else
   log "检测到 Docker 已安装, 跳过。"
 fi
@@ -156,7 +167,11 @@ grep -q '^ACCESS_KEY='  .env 2>/dev/null || echo "ACCESS_KEY=${ACCESS_KEY:-}" >>
 
 # 拉镜像
 log "拉取镜像 $IMAGE ..."
-docker pull "$IMAGE"
+if ! docker pull "$IMAGE"; then
+  err "拉取镜像失败 (原因: 无法访问 ghcr.io / 网络受限 / 镜像标签不存在 / docker 未登录该仓库)。"
+  err "排查: 1) 试 'docker pull $IMAGE' 看完整报错  2) 服务器能否访问 ghcr.io  3) 若在受限网络, 配置 http_proxy/https_proxy 后重试。"
+  exit 1
+fi
 
 # 旧容器先停 (数据目录保留)
 if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$SERVICE_NAME"; then
@@ -166,7 +181,11 @@ if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$SERVICE_NAME"; th
 fi
 
 log "启动容器 ..."
-docker compose -f docker-compose.yml up -d
+if ! docker compose -f docker-compose.yml up -d; then
+  err "容器启动失败 (原因: 端口 $PORT 被占用 / .env 配置错 / 镜像架构不符 / compose 语法错)。"
+  err "排查: 1) 'docker logs $SERVICE_NAME' 看容器日志  2) 确认端口未被占: 'ss -ltnp | grep $PORT'  3) 检查 $INSTALL_DIR/.env。"
+  exit 1
+fi
 
 # ---------------------------------------------------------------- 4. 等待就绪
 PORT="$(grep -E '^GRANIAN_PORT=' .env | cut -d= -f2 || echo 8091)"
