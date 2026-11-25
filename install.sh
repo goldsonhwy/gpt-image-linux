@@ -125,6 +125,7 @@ fi
 
 # ---------------------------------------------------------------- 4. 反向代理 (仅当填了域名)
 DOMAIN="$(grep -E '^DOMAIN=' .env | cut -d= -f2 || echo "")"
+PORT="$(grep -E '^GRANIAN_PORT=' .env | cut -d= -f2 || echo 8091)"
 if [ -n "$DOMAIN" ]; then
   log "配置反向代理 https://$DOMAIN -> 127.0.0.1:$PORT ..."
   # 4a. 检测已装的反代: caddy 优先, 其次 nginx
@@ -147,6 +148,7 @@ if [ -n "$DOMAIN" ]; then
 
   if [ "$RP" = "caddy" ]; then
     # caddy: 单站点 Caddyfile 即反代 + 自动 Let's Encrypt HTTPS
+    mkdir -p /etc/caddy
     CADDY_SITE="/etc/caddy/gpt-image-panel.caddy"
     cat > "$CADDY_SITE" <<EOF
 $DOMAIN {
@@ -167,6 +169,7 @@ EOF
     warn "caddy 已配置 $DOMAIN -> :$PORT (自动申请 Let's Encrypt 证书)。请确保该域名 DNS A 记录指向本机 IP。"
   elif [ "$RP" = "nginx" ]; then
     # nginx: 反代 + certbot 证书
+    mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
     NGX_SITE="/etc/nginx/sites-available/gpt-image-panel"
     cat > "$NGX_SITE" <<EOF
 server {
