@@ -12,7 +12,9 @@
 curl -fsSL https://raw.githubusercontent.com/goldsonhwy/gpt-image-linux/main/install.sh | bash
 ```
 
-> 脚本自动：装 Docker 与系统依赖 → 提示端口 + 访问密钥 → 拉镜像起容器 → 打印 `http://服务器IP:端口`。脚本在 [`install.sh`](install.sh)。
+> 脚本自动：装 Docker 与系统依赖 → 提示**端口**、**域名**、**访问密钥** → 拉镜像起容器 → 若填了域名，自动检测已装的 caddy/nginx（没有就装 caddy）做 **HTTPS 反向代理** → 打印 `https://域名` 与 `http://IP:端口`。脚本在 [`install.sh`](install.sh)。
+
+> 不填域名 = 纯 IP:端口 直连（无反代）；填域名 = 自动 HTTPS 反代（域名 DNS A 记录需指向本机 IP）。
 
 ## 本 fork 相比原版的改动（gima 版）
 
