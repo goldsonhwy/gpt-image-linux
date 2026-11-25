@@ -178,6 +178,12 @@ do_install(){
       echo "GRANIAN_PORT=${PORT}"
       [ -n "$ACCESS_KEY" ] && echo "ACCESS_KEY=${ACCESS_KEY}" || echo "ACCESS_KEY="
       echo "DOMAIN=${DOMAIN}"
+      # 登录 cookie 的 Secure 属性必须匹配实际协议:
+      #   有域名(HTTPS 反代) -> true;  无域名(纯 HTTP 直连) -> false
+      # 否则 HTTP 直连时 Secure cookie 设不上, 填对密码也登不进 (你遇到的问题根因)
+      if [ -n "$DOMAIN" ]; then echo "ACCESS_COOKIE_SECURE=true"
+      else echo "ACCESS_COOKIE_SECURE=false"
+      fi
     } > "$INSTALL_DIR/.env"
     if [ -n "$DOMAIN" ]; then
       echo "PUBLIC_ORIGIN=https://$DOMAIN" >> "$INSTALL_DIR/.env"
