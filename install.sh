@@ -232,6 +232,7 @@ if [ -n "$DOMAIN" ]; then
     if ! grep -qxF "$DOMAIN" "$CADDY_MAIN"; then
       cat >> "$CADDY_MAIN" <<EOF
 
+# gpt-image-panel (install.sh)
 $DOMAIN {
     reverse_proxy 127.0.0.1:${PORT} {
         header_up Host {upstream_hostport}

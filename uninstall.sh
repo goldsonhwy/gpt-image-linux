@@ -55,16 +55,20 @@ if [ -f "$CADDY_MAIN" ] && grep -qF "$CADDY_MARKER" "$CADDY_MAIN"; then
     echo "  [DRY] 移除 caddy 站点 + 重载"
   else
     tmp="$(mktemp)"
+    # 删我加的块: 从 marker 行开始, 删到该站点块的收尾 "}" (顶格 }, 站点级)
     awk -v m="$CADDY_MARKER" '
-      $0 ~ m {skip=1}                       # 遇到我加的标记 -> 开始跳
-      skip && /^\} *$/ {skip=0; print "}"; next}  # 到我那段的 } 结束, 补回 }
-      skip {next}
-      {print}
+      index($0, m) { skip=1; depth=0 }
+      skip {
+        depth += gsub(/\{/,"{") - gsub(/\}/,"}")
+        if (depth<=0 && $0 ~ /\}/) skip=0
+        next
+      }
+      { print }
     ' "$CADDY_MAIN" > "$tmp"
-    # 若移除后 Caddyfile 空了, 写个空模板
-    grep -qF "$CADDY_MARKER" "$tmp" && cp "$tmp" "$CADDY_MAIN" || cp "$tmp" "$CADDY_MAIN"
-    [ ! -s "$CADDY_MAIN" ] && printf '# no sites\n' > "$CADDY_MAIN"
+    cp "$tmp" "$CADDY_MAIN"
     rm -f "$tmp"
+    # 删后若 Caddyfile 只剩空白/注释, 写个空占位避免 caddy validate 报错
+    if ! grep -qE '^[^#[:space:]]' "$CADDY_MAIN"; then printf '# (no sites)\n' > "$CADDY_MAIN"; fi
     systemctl reload caddy 2>/dev/null || systemctl restart caddy 2>/dev/null || true
   fi
 else
