@@ -9,10 +9,13 @@
 ## 一键部署（Debian/Ubuntu，无需反代）
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/goldsonhwy/gpt-image-linux/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/goldsonhwy/gpt-image-linux/main/manage.sh | bash
+# 运行后选: 1=安装, 2=卸载
 ```
 
-> 脚本自动：装 Docker 与系统依赖 → 提示**端口**、**域名**、**访问密钥** → 拉镜像起容器 → 若填了域名，自动检测已装的 caddy/nginx（没有就装 caddy）做 **HTTPS 反向代理** → 打印 `https://域名` 与 `http://IP:端口`。脚本在 [`install.sh`](install.sh)。
+> **统一脚本 `manage.sh`**（安装+卸载合并）：选 `1` 安装——环境预检+暂停确认 → 装 Docker/依赖 → 拉镜像起容器 → 有域名自动 HTTPS 反代 → 打印地址；访问密码**默认留空=首次进面板自行设置**（想手动锁定就在交互处填）。选 `2` 卸载——只删本程序+其产物（容器/镜像/数据目录/我加的 caddy 站点），**不删 docker、不删 caddy/nginx 反代程序**。
+>
+> 旧的 [`install.sh`](install.sh) / [`uninstall.sh`](uninstall.sh) 仍保留可用（向后兼容），功能等同。
 
 > 不填域名 = 纯 IP:端口 直连（无反代）；填域名 = 自动 HTTPS 反代（域名 DNS A 记录需指向本机 IP）。
 
