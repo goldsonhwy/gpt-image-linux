@@ -27,6 +27,62 @@ err(){  printf '\033[1;31m[错误]\033[0m %s\n' "$*" >&2; }
 
 [ "$(id -u)" -eq 0 ] || { err "请用 root 或 sudo 运行本脚本"; exit 1; }
 
+# ---------------------------------------------------------------- 0. 环境预检 + 暂停确认
+# 检测: docker / 反代(caddy或nginx) / 必要依赖 -> 先暂停, 告诉用户什么已装/将装, 默认回车开装
+probe(){ command -v "$1" >/dev/null 2>&1; }
+
+log "环境预检 ..."
+# 1) docker
+if probe docker && docker compose version >/dev/null 2>&1; then
+  HAS_DOCKER=1; DOCKER_STATE="docker + compose 已安装"
+elif probe docker; then
+  HAS_DOCKER=1; DOCKER_STATE="docker 已装, compose 插件缺失 (将补装 docker-compose-plugin)"
+else
+  HAS_DOCKER=0; DOCKER_STATE="docker 未安装 (将安装 docker-ce + 依赖)"
+fi
+# 2) 反代
+RP_INSTALLED=""
+if probe caddy; then RP_INSTALLED="caddy"; elif probe nginx; then RP_INSTALLED="nginx"; fi
+# 3) 必要依赖
+MISSING_DEPS=""
+for d in ca-certificates curl gnupg openssl; do
+  if ! dpkg -s "$d" >/dev/null 2>&1; then MISSING_DEPS="$MISSING_DEPS $d"; fi
+done
+[ -n "$MISSING_DEPS" ] && MISSING_DEPS="系统依赖未装:${MISSING_DEPS}"
+
+# 汇总打印
+echo
+printf '%s\n' "========== 环境检查结果 =========="
+printf '  [docker ] %s\n' "$DOCKER_STATE"
+if [ -n "$RP_INSTALLED" ]; then
+  printf '  [反代   ] 已装 %s (若填域名, 直接用它反代)\n' "$RP_INSTALLED"
+else
+  printf '  [反代   ] 未装 caddy/nginx; 若填域名, 将自动安装 caddy (含 HTTPS 证书)\n'
+fi
+if [ -n "$MISSING_DEPS" ]; then
+  printf '  [依赖   ] %s -> 将 apt-get install\n' "$MISSING_DEPS"
+else
+  printf '  [依赖   ] ca-certificates/curl/gnupg/openssl 已齐\n'
+fi
+printf '  [将执行] 停止/删除旧容器 -> 拉镜像 %s -> 起容器 -> (有域名则配反代) -> 打印地址\n' "$IMAGE"
+printf '%s\n' "=================================="
+echo
+
+# 暂停确认: 交互(tty)等输入, 默认回车=继续; 非交互(curl|bash)默认继续(可设 AUTO_NO=1 跳过)
+DO_INSTALL=1
+if [ -t 0 ] && [ "${AUTO_NO:-0}" != 1 ]; then
+  read -r -p "开始安装? 回车继续 / 输 n 取消: " ANS || ANS=""
+  case "$ANS" in
+    n|N) DO_INSTALL=0 ;;
+    *) DO_INSTALL=1 ;;
+  esac
+fi
+if [ "$DO_INSTALL" != 1 ]; then
+  warn "已取消, 未安装任何东西。"
+  exit 0
+fi
+log "开始安装 ..."
+
 # ---------------------------------------------------------------- 1. Docker + 依赖
 need_docker=0;  command -v docker >/dev/null 2>&1 || need_docker=1
 
