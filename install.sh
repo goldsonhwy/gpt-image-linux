@@ -26,7 +26,6 @@ err(){  printf '\033[1;31m[错误]\033[0m %s\n' "$*" >&2; }
 
 # ---------------------------------------------------------------- 1. Docker + 依赖
 need_docker=0;  command -v docker >/dev/null 2>&1 || need_docker=1
-need_compose=0; docker compose version >/dev/null 2>&1 || need_compose=1
 
 if [ "$need_docker" = 1 ]; then
   log "安装 Docker (官方仓库) ..."
@@ -44,7 +43,9 @@ https://download.docker.com/linux/$(. /etc/os-release && echo "$ID") $(. /etc/os
 else
   log "检测到 Docker 已安装, 跳过。"
 fi
-
+systemctl enable --now docker 2>/dev/null || true
+# compose 在 docker 就绪后再检测 (避免 docker 未装时误判)
+need_compose=0; docker compose version >/dev/null 2>&1 || need_compose=1
 # compose 插件缺失 -> 补装
 if [ "$need_compose" = 1 ]; then
   log "安装 docker-compose-plugin ..."
@@ -53,7 +54,6 @@ fi
 
 log "安装系统依赖 ..."
 apt-get install -y git curl ca-certificates jq openssl >/dev/null 2>&1 || true
-systemctl enable --now docker 2>/dev/null || true
 
 # ---------------------------------------------------------------- 2. 交互提示
 if [ -f "$INSTALL_DIR/.env" ]; then
@@ -68,7 +68,8 @@ else
   if [ -t 0 ]; then
     read -r -p "域名 (回车=跳过; 填了将自动 HTTPS 反代): " DOMAIN || true
   fi
-  DOMAIN="$(printf '%s' "${DOMAIN:-}" | sed 's#^https\{0,1\}//##; s#/\{0,1\}$##')"
+  # 清洗域名: 去掉 http(s):// 前缀和尾部斜杠
+  DOMAIN="${DOMAIN#http://}"; DOMAIN="${DOMAIN#https://}"; DOMAIN="${DOMAIN%/}"
   ACCESS_KEY=""
   if [ -t 0 ]; then
     read -r -p "访问密钥 ACCESS_KEY (回车=随机生成): " ACCESS_KEY || true
@@ -91,6 +92,10 @@ fi
 
 # ---------------------------------------------------------------- 3. 部署 (生成 compose 兜底, 不依赖 clone)
 cd "$INSTALL_DIR"
+# 无论 .env 新建还是复用, 确保 PORT/ACCESS_KEY 有值 (set -u 防 unbound)
+PORT="$(grep -E '^GRANIAN_PORT=' .env 2>/dev/null | cut -d= -f2 || true)"
+[ -z "$PORT" ] && PORT=8091
+ACCESS_KEY="$(grep -E '^ACCESS_KEY=' .env 2>/dev/null | cut -d= -f2 || true)"
 if [ ! -f docker-compose.yml ]; then
   log "生成 docker-compose.yml ..."
   cat > docker-compose.yml <<EOF
@@ -161,11 +166,12 @@ if [ -n "$DOMAIN" ]; then
   fi
 
   if [ "$RP" = "caddy" ]; then
-    # caddy: 整体接管默认 Caddyfile, 加域名站点 (避免默认 :80 站点抢端口)
+    # caddy: 在默认 Caddyfile 追加域名站点 (不破坏已有其它站点)
+    mkdir -p /etc/caddy
     CADDY_MAIN="/etc/caddy/Caddyfile"
-    # 备份默认 Caddyfile, 若里面没有我们站点则加进去
-    [ -f "$CADDY_MAIN" ] && grep -qxF "$DOMAIN" "$CADDY_MAIN" || {
-      # 追加站点 (保留已有站点, 不破坏其它服务)
+    # 文件不存在则创建空 Caddyfile; 已含该域名则跳过 (幂等)
+    [ -f "$CADDY_MAIN" ] || : > "$CADDY_MAIN"
+    if ! grep -qxF "$DOMAIN" "$CADDY_MAIN"; then
       cat >> "$CADDY_MAIN" <<EOF
 
 $DOMAIN {
@@ -175,10 +181,11 @@ $DOMAIN {
     encode gzip zstd
 }
 EOF
-    }
-    systemctl enable caddy >/dev/null 2>&1 || true
+      log "已向 $CADDY_MAIN 追加 $DOMAIN 站点。"
+    fi
+    systemctl enable --now caddy >/dev/null 2>&1 || systemctl restart caddy 2>/dev/null || true
     caddy validate --config "$CADDY_MAIN" >/dev/null 2>&1 || warn "caddy 配置校验失败, 请检查 $CADDY_MAIN"
-    systemctl reload caddy >/dev/null 2>&1 || systemctl restart caddy
+    systemctl reload caddy >/dev/null 2>&1 || systemctl restart caddy 2>/dev/null || true
     warn "caddy 已配 $DOMAIN -> :$PORT (自动申请 Let's Encrypt)。请确保该域名 DNS A 记录指向本机 IP。"
   else
     # nginx: 反代 + certbot
