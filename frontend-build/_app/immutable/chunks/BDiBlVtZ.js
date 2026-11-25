@@ -1,0 +1,1 @@
+import{s as e}from"./CGEWKYnn.js";import"./BXZjRUTB.js";function t(){let{subscribe:t,set:n}=e(null);return{subscribe:t,show(e){n(e)},clear(){n(null)}}}var n=t();export{n as t};

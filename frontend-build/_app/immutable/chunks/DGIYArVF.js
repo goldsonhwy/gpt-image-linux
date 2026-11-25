@@ -1,0 +1,1 @@
+var e=new Set([`queued`,`running`]),t=new Set([`partial_failure`,`error`,`cancelled`,`interrupted`,`upstream_error`]);function n(t){return!!(t&&e.has(t))}function r(e){return!!(e&&t.has(e))}export{r as n,n as t};

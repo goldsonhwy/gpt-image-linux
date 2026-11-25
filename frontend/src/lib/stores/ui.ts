@@ -19,16 +19,24 @@ export type UiState = {
   settingsOpen: boolean;
   jobsOpen: boolean;
   promptSnippetsOpen: boolean;
+  imagePromptOpen: boolean;
   sizeDialogOpen: boolean;
+  preferencesOpen: boolean;
   editPreviewOpen: boolean;
+  maskEditorOpen: boolean;
+  markupEditorOpen: boolean;
 };
 
 const initialUiState: UiState = {
   settingsOpen: false,
   jobsOpen: false,
   promptSnippetsOpen: false,
+  imagePromptOpen: false,
   sizeDialogOpen: false,
-  editPreviewOpen: false
+  preferencesOpen: false,
+  editPreviewOpen: false,
+  maskEditorOpen: false,
+  markupEditorOpen: false
 };
 
 function createToastStore() {

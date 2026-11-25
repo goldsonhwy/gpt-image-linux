@@ -1,4 +1,4 @@
-import type { GenerateJobStatus } from '$lib/api/types';
+import type { GenerateJobStatus } from '$lib/api/types/jobs';
 import { isFailureJobStatus } from '$lib/utils/jobs';
 
 function safeAssetUrl(url?: string | null) {
@@ -23,6 +23,66 @@ export function downloadUrl(filename: string) {
 
 export function filenameFromImageUrl(url: string) {
   return decodeURIComponent(url.split('/').pop() || '');
+}
+
+export function isGifFilename(filename?: string | null): boolean {
+  if (!filename) return false;
+  return /\.gif$/i.test(filename.trim());
+}
+
+export type MediaLike = {
+  filename?: string | null;
+  output_format?: string | null;
+  image_url?: string | null;
+  thumbnail_url?: string | null;
+};
+
+export function isGifMedia(media?: MediaLike | null): boolean {
+  if (!media) return false;
+  if (media.output_format?.trim().toLowerCase() === 'gif') return true;
+  return isGifFilename(media.filename) || isGifFilename(media.image_url);
+}
+
+export function isSvgMedia(media?: MediaLike | null): boolean {
+  if (!media) return false;
+  if (media.output_format?.trim().toLowerCase() === 'svg') return true;
+  return /\.svg$/i.test((media.filename || '').trim());
+}
+
+/** The original-image URL behind a `/api/thumb/` URL, or null when it is not one. */
+export function originalUrlForThumbnail(url?: string | null): string | null {
+  const match = /^\/api\/thumb\/(.+)$/.exec(url || '');
+  return match ? `/api/image/${match[1]}` : null;
+}
+
+/** `<img onerror>` handler: a missing thumbnail falls back to the original once. */
+export function revertThumbnailToOriginal(image: HTMLImageElement) {
+  if (image.dataset.thumbFallback) return;
+  const original = originalUrlForThumbnail(image.getAttribute('src'));
+  if (!original) return;
+  image.dataset.thumbFallback = '1';
+  image.src = original;
+}
+
+export function previewMediaUrl(media: MediaLike): string {
+  const filename = media.filename || filenameFromImageUrl(media.image_url || '') || '';
+  return thumbnailUrl(filename, media.thumbnail_url);
+}
+
+export function prefersReducedMotion(): boolean {
+  return (
+    typeof window !== 'undefined' &&
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  );
+}
+
+export function gifInteractiveSrc(media: MediaLike, active: boolean): string {
+  const filename = media.filename || filenameFromImageUrl(media.image_url || '') || '';
+  if (active && isGifMedia(media) && !prefersReducedMotion()) {
+    return imageUrl(filename, media.image_url);
+  }
+  return thumbnailUrl(filename, media.thumbnail_url);
 }
 
 export function formatBytes(totalBytes: number) {
@@ -64,8 +124,6 @@ export function formatLocalTime(value: string | null | undefined) {
   return `${part('year')}-${part('month')}-${part('day')} ${part('hour')}:${part('minute')}:${part('second')}`;
 }
 
-export const formatBeijingTime = formatLocalTime;
-
 type ImageSizeLike = {
   size?: string | null;
   image_width?: number | null;
@@ -79,14 +137,28 @@ export function displayImageSize(image: ImageSizeLike | null | undefined) {
 
 export function stageLabel(job: GenerateJobStatus | null, labels?: Record<string, string>) {
   if (!job?.stage) return '';
-  const failureMessage = jobFailureMessage(job);
-  if (failureMessage) return failureMessage;
-
   const translated = labels?.[job.stage];
-  if (!translated) return job.message || job.stage.replaceAll('_', ' ');
+  const legacyProgressMatch = job.message?.match(/\((\d+\/\d+)(?: completed)?\)\s*$/);
+  const messageWithoutProgress = legacyProgressMatch
+    ? job.message?.slice(0, legacyProgressMatch.index).trim()
+    : job.message;
+  const baseLabel = translated || messageWithoutProgress || job.stage.replaceAll('_', ' ');
+  const completedCount = job.completed_count;
+  const totalCount = job.n;
+  if (
+    Number.isInteger(completedCount) &&
+    Number.isInteger(totalCount) &&
+    Number(completedCount) >= 0 &&
+    Number(totalCount) > 0
+  ) {
+    return `${baseLabel} (${completedCount}/${totalCount})`;
+  }
 
-  const progressSuffix = job.message?.match(/\(\d+\/\d+\)$/)?.[0];
-  return progressSuffix ? `${translated} ${progressSuffix}` : translated;
+  const legacyProgress = legacyProgressMatch?.[1];
+  if (legacyProgress) return `${baseLabel} (${legacyProgress})`;
+
+  const failureMessage = jobFailureMessage(job);
+  return failureMessage || baseLabel;
 }
 
 export function jobFailureMessage(job: GenerateJobStatus | null | undefined, fallback = '') {
@@ -102,6 +174,18 @@ export function statusLabel(status: string | null | undefined, labels?: Record<s
 export function operationLabel(operation: string | null | undefined, labels?: Record<string, string>) {
   if (!operation) return labels?.generation || 'generation';
   return labels?.[operation] || operation;
+}
+
+export function formatTokenCount(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) return '';
+  return new Intl.NumberFormat().format(value);
+}
+
+export function formatUsdCost(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) return '';
+  const abs = Math.abs(value);
+  const decimals = abs === 0 ? 2 : abs < 0.01 ? 6 : abs < 1 ? 4 : 2;
+  return `$${value.toFixed(decimals)}`;
 }
 
 export async function copyText(text: string) {

@@ -1,4 +1,4 @@
-import { browser } from '$app/environment';
+import { BROWSER as browser } from 'esm-env';
 import { writable } from 'svelte/store';
 
 export type Theme = 'light' | 'dark';
@@ -6,21 +6,19 @@ export type Theme = 'light' | 'dark';
 const STORAGE_KEY = 'gpt-image-panel-theme';
 const MEDIA_QUERY = '(prefers-color-scheme: dark)';
 
-const theme = writable<Theme>('dark');
+// The inline script in app.html already detected the system theme and applied
+// it to the DOM before hydration, so seed the store from the DOM to avoid a
+// flash of the wrong theme between first store read and init().
+function initialTheme(): Theme {
+  if (!browser) return 'dark';
+  const fromDom = document.documentElement.dataset.theme;
+  return fromDom === 'light' || fromDom === 'dark' ? fromDom : 'dark';
+}
+
+const theme = writable<Theme>(initialTheme());
 
 let mediaQueryList: MediaQueryList | null = null;
 let mediaListener: ((event: MediaQueryListEvent) => void) | null = null;
-
-function systemTheme(): Theme {
-  if (!browser) return 'dark';
-  return window.matchMedia(MEDIA_QUERY).matches ? 'dark' : 'light';
-}
-
-function readStoredTheme(): Theme | null {
-  if (!browser) return null;
-  const value = window.localStorage.getItem(STORAGE_KEY);
-  return value === 'light' || value === 'dark' ? value : null;
-}
 
 function applyTheme(nextTheme: Theme) {
   if (!browser) return;
@@ -31,10 +29,9 @@ function applyTheme(nextTheme: Theme) {
   document.querySelector('meta[name="theme-color"]')?.setAttribute('content', nextTheme === 'dark' ? '#09090b' : '#fafaf9');
 }
 
-function setTheme(nextTheme: Theme, persist = true) {
+function setTheme(nextTheme: Theme) {
   theme.set(nextTheme);
   applyTheme(nextTheme);
-  if (browser && persist) window.localStorage.setItem(STORAGE_KEY, nextTheme);
 }
 
 function cleanupMediaListener() {
@@ -45,37 +42,34 @@ function cleanupMediaListener() {
 }
 
 function init() {
-  if (!browser) return;
+  if (!browser) return () => {};
 
   cleanupMediaListener();
 
-  const initialTheme = readStoredTheme() || systemTheme();
-  theme.set(initialTheme);
-  applyTheme(initialTheme);
+  // Remove the former manual override so existing installations resume following the system.
+  try {
+    window.localStorage.removeItem(STORAGE_KEY);
+  } catch {
+    // Theme synchronization still works when storage is unavailable.
+  }
+
+  // Fallback for environments where the app.html inline script did not run.
+  if (!document.documentElement.dataset.theme) {
+    setTheme(window.matchMedia(MEDIA_QUERY).matches ? 'dark' : 'light');
+  } else {
+    theme.set(initialTheme());
+  }
 
   mediaQueryList = window.matchMedia(MEDIA_QUERY);
   mediaListener = (event) => {
-    if (readStoredTheme()) return;
-    const nextTheme: Theme = event.matches ? 'dark' : 'light';
-    theme.set(nextTheme);
-    applyTheme(nextTheme);
+    setTheme(event.matches ? 'dark' : 'light');
   };
   mediaQueryList.addEventListener('change', mediaListener);
-}
 
-function toggle() {
-  let nextTheme: Theme = 'dark';
-  theme.update((current) => {
-    nextTheme = current === 'dark' ? 'light' : 'dark';
-    return nextTheme;
-  });
-  applyTheme(nextTheme);
-  if (browser) window.localStorage.setItem(STORAGE_KEY, nextTheme);
+  return cleanupMediaListener;
 }
 
 export const themeStore = {
   subscribe: theme.subscribe,
-  init,
-  set: setTheme,
-  toggle
+  init
 };

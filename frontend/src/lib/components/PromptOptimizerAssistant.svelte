@@ -1,21 +1,21 @@
 <script lang="ts">
-  import { browser } from '$app/environment';
-  import { onDestroy, onMount } from 'svelte';
+  import { dialogIn, dialogOut, overlayIn, overlayOut } from '$lib/motion';
+  import { BROWSER as browser } from 'esm-env';
   import { dialog } from '$lib/actions/dialog';
+  import { onDestroy, onMount, untrack } from 'svelte';
+  import { promptForm } from '$lib/features/workspace/formState.svelte';
+  import { MAX_PROMPT_CHARS, promptLength } from '$lib/utils/imageModels';
   import { plainTextInput } from '$lib/actions/plainTextInput';
-  import { apiFetch } from '$lib/api/client';
   import { language, t } from '$lib/i18n';
-  import type { ApiPath, PromptOptimizeResponse } from '$lib/api/types';
-  import { initialPromptFormState, type PromptFormState } from '$lib/stores/preview';
-  import { buildPromptOptimizeRequest } from '$lib/utils/promptOptimizer';
+  import { requestPromptOptimize } from '$lib/utils/promptOptimizer';
 
-  export let currentPrompt = '';
-  export let apiPath: ApiPath = initialPromptFormState.apiPath;
-  export let model = initialPromptFormState.model;
-  export let size = initialPromptFormState.size;
-  export let quality: PromptFormState['quality'] = initialPromptFormState.quality;
-  export let onApplyPrompt: (prompt: string) => void = () => {};
-  export let enabled = true;
+  interface Props {
+    onApplyPrompt?: (prompt: string) => void;
+    enabled?: boolean;
+    visible?: boolean;
+  }
+
+  let { onApplyPrompt = () => {}, enabled = true, visible = true }: Props = $props();
 
   type Phase = 'draft' | 'review';
   type FloatingPosition = {
@@ -28,34 +28,42 @@
   const TAP_MOVE_THRESHOLD = 8;
   const VIEWPORT_EDGE_GAP = 12;
 
-  let triggerButton: HTMLButtonElement | null = null;
-  let open = false;
-  let phase: Phase = 'draft';
-  let intent = '';
-  let error = '';
-  let optimizing = false;
-  let optimizedPrompt = '';
-  let originalPrompt = '';
-  let submittedIntent = '';
+  let triggerButton: HTMLButtonElement | null = $state(null);
+  let open = $state(false);
+  let phase = $state<Phase>('draft');
+  let intent = $state('');
+  let error = $state('');
+  let optimizing = $state(false);
+  let optimizedPrompt = $state('');
+  let originalPrompt = $state('');
+  let submittedIntent = $state('');
+  let floatingPosition = $state<FloatingPosition | null>(browser ? readStoredPosition() : null);
+  let dragging = $state(false);
   let requestSeq = 0;
   let activeRequest: AbortController | null = null;
-  let floatingPosition: FloatingPosition | null = browser ? readStoredPosition() : null;
   let pressTimer: ReturnType<typeof setTimeout> | null = null;
   let activePointerId: number | null = null;
   let pointerDownAt: FloatingPosition | null = null;
   let pointerDownTriggerPosition: FloatingPosition | null = null;
   let dragPointerOffset: FloatingPosition | null = null;
   let dragPending = false;
-  let dragging = false;
   let suppressClick = false;
   let lastPointerPosition: FloatingPosition | null = null;
   let resizeObserver: ResizeObserver | null = null;
   let observedTriggerButton: HTMLButtonElement | null = null;
   let triggerSize: { width: number; height: number } | null = null;
 
-  $: submitDisabled = optimizing || !intent.trim() || !currentPrompt.trim();
-  $: if (!enabled && open) closeAssistant();
-  $: syncTriggerObserver(enabled, triggerButton);
+  const currentPrompt = $derived(promptForm.prompt);
+  const submitDisabled = $derived(optimizing || !intent.trim() || !currentPrompt.trim());
+
+  $effect(() => {
+    if (!enabled && open) closeAssistant();
+  });
+  $effect(() => {
+    // Untracked: the observer internally reads and re-clamps the floating
+    // position, which must not become a dependency of this effect.
+    untrack(() => syncTriggerObserver(visible, triggerButton));
+  });
 
   function readStoredPosition(): FloatingPosition | null {
     if (!browser) return null;
@@ -189,13 +197,13 @@
     phase = 'draft';
     error = '';
     optimizedPrompt = '';
-    originalPrompt = currentPrompt.trim();
+    originalPrompt = promptForm.prompt.trim();
     submittedIntent = '';
     intent = '';
   }
 
   async function submitOptimization() {
-    const trimmedPrompt = currentPrompt.trim();
+    const trimmedPrompt = promptForm.prompt.trim();
     const trimmedIntent = intent.trim();
     if (!trimmedPrompt || !trimmedIntent || optimizing) return;
 
@@ -207,25 +215,17 @@
     error = '';
 
     try {
-      const response = await apiFetch<PromptOptimizeResponse>(
-        '/api/prompt/optimize',
+      const response = await requestPromptOptimize(
         {
-          method: 'POST',
-          signal: activeRequest.signal,
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(
-            buildPromptOptimizeRequest({
-              prompt: trimmedPrompt,
-              intent: trimmedIntent,
-              targetLanguage: $language,
-              apiPath,
-              model,
-              size,
-              quality
-            })
-          )
+          prompt: trimmedPrompt,
+          intent: trimmedIntent,
+          targetLanguage: $language,
+          apiPath: promptForm.apiPath,
+          model: promptForm.model,
+          size: promptForm.size,
+          quality: promptForm.quality
         },
-        'optimizing prompt'
+        activeRequest.signal
       );
 
       if (seq !== requestSeq) return;
@@ -343,14 +343,7 @@
       }
     }
 
-    clearPressTimer();
-    activePointerId = null;
-    pointerDownAt = null;
-    pointerDownTriggerPosition = null;
-    dragPointerOffset = null;
-    dragPending = false;
-    dragging = false;
-    lastPointerPosition = null;
+    resetPointerState();
   }
 
   function handlePointerCancel(event: PointerEvent) {
@@ -374,10 +367,21 @@
       setFloatingPosition(floatingPosition, false);
     }
 
-    window.addEventListener('resize', clampToViewport);
+    let ticking = false;
+    let rafId = 0;
+    const onResize = () => {
+      if (ticking) return;
+      ticking = true;
+      rafId = requestAnimationFrame(() => {
+        clampToViewport();
+        ticking = false;
+      });
+    };
+    window.addEventListener('resize', onResize, { passive: true });
 
     return () => {
-      window.removeEventListener('resize', clampToViewport);
+      window.removeEventListener('resize', onResize);
+      if (rafId) cancelAnimationFrame(rafId);
       disconnectTriggerObserver();
       resetPointerState();
     };
@@ -389,48 +393,50 @@
   });
 </script>
 
-{#if enabled}
+{#if visible}
   <button
     type="button"
     bind:this={triggerButton}
+    disabled={!enabled}
     data-testid="prompt-optimizer-assistant-trigger"
-    class:cursor-grabbing={dragging}
-    class="control-focus fixed bottom-4 right-4 z-40 inline-flex touch-none select-none items-center gap-2 rounded-full border border-emerald-500/30 bg-emerald-600 px-4 py-3 text-sm font-semibold text-white shadow-[0_18px_36px_-24px_rgba(16,185,129,0.6)] transition-transform hover:bg-emerald-500 active:scale-[0.98] sm:bottom-6 sm:right-6"
+    class:cursor-grabbing={dragging && enabled}
+    class:cursor-not-allowed={!enabled}
+    class="control-focus fixed bottom-4 right-3 z-40 inline-flex h-11 w-11 touch-none select-none items-center justify-center gap-2 rounded-lg border text-sm font-semibold transition-transform active:scale-[0.98] sm:bottom-6 sm:right-6 sm:w-auto sm:rounded-full sm:px-4 {enabled ? 'border-emerald-500/30 bg-emerald-600 text-white shadow-[0_18px_36px_-24px_rgba(16,185,129,0.6)] hover:bg-emerald-500' : 'cursor-not-allowed border-stone-300 bg-stone-200/90 text-stone-400 shadow-none dark:border-zinc-700 dark:bg-zinc-800/90 dark:text-zinc-500'}"
     aria-haspopup="dialog"
     aria-expanded={open}
     aria-label={$t.promptOptimizerAssistant.open}
-    title={$t.promptOptimizerAssistant.open}
+    title={enabled ? $t.promptOptimizerAssistant.open : $t.aiAssistant.unavailable}
     style:left={floatingPosition ? `${floatingPosition.x}px` : null}
     style:top={floatingPosition ? `${floatingPosition.y}px` : null}
     style:right={floatingPosition ? 'auto' : null}
     style:bottom={floatingPosition ? 'auto' : null}
-    on:pointerdown={handlePointerDown}
-    on:pointermove={handlePointerMove}
-    on:pointerup={handlePointerUp}
-    on:pointercancel={handlePointerCancel}
-    on:click={handleClick}
-    on:contextmenu|preventDefault
+    onpointerdown={handlePointerDown}
+    onpointermove={handlePointerMove}
+    onpointerup={handlePointerUp}
+    onpointercancel={handlePointerCancel}
+    onclick={handleClick}
+    oncontextmenu={(event) => event.preventDefault()}
   >
     <svg viewBox="0 0 24 24" class="h-4 w-4 shrink-0 fill-none stroke-current stroke-[1.8]" aria-hidden="true">
       <path d="M4 12h6"></path>
       <path d="M8 8.5 9.5 5 11 8.5 14.5 10 11 11.5 9.5 15 8 11.5 4.5 10 8 8.5Z"></path>
       <path d="M15.5 13.5 16.5 11l1 2.5 2.5 1-2.5 1-1 2.5-1-2.5-2.5-1 2.5-1Z"></path>
     </svg>
-    <span class="whitespace-nowrap">{$t.promptOptimizerAssistant.open}</span>
+    <span class="hidden whitespace-nowrap sm:inline">{$t.promptOptimizerAssistant.open}</span>
   </button>
 {/if}
 
 {#if enabled && open}
-  <div class="mobile-dialog-root fixed inset-0 z-[92] flex items-center justify-center bg-black/65 p-4">
+  <div class="mobile-dialog-root fixed inset-0 z-[92] flex items-center justify-center bg-black/65 p-4" in:overlayIn out:overlayOut>
     <button
       type="button"
       class="absolute inset-0"
       tabindex="-1"
       aria-label={$t.promptOptimizerAssistant.closeLabel}
-      on:click={closeAssistant}
+      onclick={closeAssistant}
     ></button>
     <div
-      class="mobile-dvh-dialog fade-in relative z-10 flex w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-stone-200 bg-white shadow-[0_24px_90px_-32px_rgba(15,23,42,0.45)] dark:border-zinc-800 dark:bg-zinc-950 dark:shadow-none"
+      class="mobile-dvh-dialog overlay-panel relative z-10 flex w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-stone-200 bg-white dark:border-zinc-800 dark:bg-zinc-950" in:dialogIn out:dialogOut
       aria-labelledby="prompt-optimizer-assistant-title"
       use:dialog={{ open, onClose: closeAssistant }}
     >
@@ -448,7 +454,7 @@
           class="control-focus rounded-lg p-2 text-stone-500 hover:bg-stone-100 hover:text-stone-950 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
           aria-label={$t.promptOptimizerAssistant.closeLabel}
           title={$t.promptOptimizerAssistant.closeLabel}
-          on:click={closeAssistant}
+          onclick={closeAssistant}
         >
           <svg viewBox="0 0 24 24" class="h-4 w-4 fill-none stroke-current stroke-[1.8]" aria-hidden="true">
             <path d="M6 6l12 12"></path>
@@ -485,7 +491,7 @@
                 <span class="text-xs font-medium text-stone-600 dark:text-zinc-400">
                   {$t.promptOptimizerAssistant.currentPromptLabel}
                 </span>
-                <span class="text-xs text-stone-500 dark:text-zinc-500">{currentPrompt.trim().length}/4000</span>
+                <span class="text-xs text-stone-500 dark:text-zinc-500">{promptLength(currentPrompt.trim())}/{MAX_PROMPT_CHARS}</span>
               </div>
               <div class="rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 text-sm leading-6 text-stone-700 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300">
                 {#if currentPrompt.trim()}
@@ -504,7 +510,7 @@
               <button
                 type="button"
                 class="control-focus rounded-lg border border-stone-300 px-4 py-2.5 text-sm font-medium text-stone-700 hover:bg-stone-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
-                on:click={closeAssistant}
+                onclick={closeAssistant}
               >
                 {$t.common.close}
               </button>
@@ -512,7 +518,7 @@
                 type="button"
                 disabled={submitDisabled}
                 class="control-focus rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
-                on:click={submitOptimization}
+                onclick={submitOptimization}
               >
                 {optimizing ? $t.promptOptimizerAssistant.optimizing : $t.promptOptimizerAssistant.optimize}
               </button>
@@ -551,14 +557,14 @@
               <button
                 type="button"
                 class="control-focus rounded-lg border border-stone-300 px-4 py-2.5 text-sm font-medium text-stone-700 hover:bg-stone-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
-                on:click={rejectOptimization}
+                onclick={rejectOptimization}
               >
                 {$t.common.reject}
               </button>
               <button
                 type="button"
                 class="control-focus rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-emerald-500"
-                on:click={acceptOptimization}
+                onclick={acceptOptimization}
               >
                 {$t.common.accept}
               </button>

@@ -1,0 +1,1799 @@
+<script lang="ts">
+  import { onMount, tick, untrack } from 'svelte';
+  import { OPEN_COMPLETION_EVENT, type CompletionTarget } from '$lib/utils/completionNotifications';
+  import { createFullPageController, type FullPageController } from '$lib/utils/fullpage';
+  import AccessGate from '$lib/components/AccessGate.svelte';
+  import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
+  import { isImage26 } from '$lib/utils/imageModels';
+  import { attachMarkup, type MarkupApplyPayload } from '$lib/features/workspace/markup';
+  import { createEditSession } from '$lib/features/workspace/editSession';
+  import { createGenerationSession } from '$lib/features/workspace/generationSession';
+  import EditSourcePicker from '$lib/components/EditSourcePicker.svelte';
+  import Header from '$lib/components/Header.svelte';
+  import PreviewPanel from '$lib/components/PreviewPanel.svelte';
+  import PromptForm from '$lib/components/PromptForm.svelte';
+  import ToastHost from '$lib/components/ToastHost.svelte';
+  import { language, t } from '$lib/i18n';
+  import type { AssistantJobDiagnoseResponse, AssistantRecommendParamsResponse } from '$lib/api/types/assistant';
+  import type { GalleryEntry } from '$lib/api/types/gallery';
+  import type { GenerateJobStatus } from '$lib/api/types/jobs';
+  import type { AIAssistantSettingsInput, OverallConfigUpdateRequest, SettingsInput } from '$lib/api/types/settings';
+  import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput } from '$lib/api/types/snippets';
+  import { accessStore } from '$lib/stores/access';
+  import { assistantStore, isAbortError } from '$lib/stores/assistant';
+  import { confirmStore } from '$lib/stores/confirm';
+  import { editSourceCount, editSourceDiscards, editSourceStore, findEditSource, isMaskValid, MASK_PASTE_BACK_PREF_KEY, MAX_EDIT_SOURCE_IMAGES, primaryEditSource as selectPrimaryEditSource, primaryEditSourceId, primaryRestoreSource, type EditGalleryReferenceSource, type EditMask } from '$lib/stores/editSource';
+  import { galleryActivityStore, galleryStore } from '$lib/stores/gallery';
+  import { jobsStore } from '$lib/stores/jobs';
+  import { lightboxStore } from '$lib/stores/lightbox';
+  import { nodeImageResult } from '$lib/stores/nodeImage';
+  import { previewStore, type SubmitOptions } from '$lib/stores/preview';
+  import { initialPromptFormState, type PromptFormState } from '$lib/utils/promptFormTypes';
+  import { preferencesStore } from '$lib/stores/preferences';
+  import { promptSnippetsStore } from '$lib/stores/promptSnippets';
+  import { settingsActivityStore, settingsStore } from '$lib/stores/settings';
+  import { settingsPrefillStore } from '$lib/stores/settingsPrefill';
+  import { presetShareStore } from '$lib/stores/presetShare';
+  import { toastStore, uiStore, type ToastOptions } from '$lib/stores/ui';
+  import { defaultCollection, galleryCollectionsStore } from '$lib/stores/galleryCollections';
+  import { versionStore } from '$lib/stores/version';
+  import { workspaceModeStore, type WorkspaceMode } from '$lib/stores/workspaceMode';
+  import { extractImageFilesFromClipboard } from '$lib/utils/clipboard';
+  import { copyText, imageUrl, isSvgMedia } from '$lib/utils/format';
+  import { singleImageImportZip } from '$lib/utils/zip';
+  import { canPrefetchNonCritical } from '$lib/utils/network';
+  import { readSettingsPrefill, stripSettingsPrefill } from '$lib/utils/settingsPrefill';
+  import { buildPresetShareUrl, readPresetShare, stripPresetShare } from '$lib/utils/presetShare';
+  import {
+    agentViewPanel,
+    assetPackPickerDialogPanel,
+    editGalleryDialogPanel,
+    editPreviewPanel,
+    galleryGridPanel,
+    imagePromptPanel,
+    jobsPanel,
+    lightboxPanel,
+    markupEditorPanel,
+    maskEditorPanel,
+    nodeImageResultPanel,
+    settingsPanel,
+    sizePanel,
+    preferencesPanel,
+    snippetsPanel
+  } from '$lib/features/workspace/panels';
+  import { promptForm } from '$lib/features/workspace/formState.svelte';
+  import { createLightboxController } from '$lib/features/workspace/lightbox';
+  import { createPanelController } from '$lib/features/workspace/panelController';
+  import { installWorkspaceLifecycle } from '$lib/features/workspace/lifecycle';
+  import { waitForGalleryAnalysis } from '$lib/features/workspace/gallery';
+  import { createUrlSyncScheduler, readPageUrl, writePageUrl, type JobsTab } from '$lib/utils/pageUrlSync';
+  import {
+    galleryEntryToEditForm,
+    galleryEntryToPromptForm,
+    galleryEntryToPromptOnly,
+    jobToPromptForm
+  } from '$lib/utils/promptForm';
+
+  let jobsTab = $state<JobsTab>('running');
+  // One drawing session per editor opening. `id` makes a late apply from a closed
+  // session detectable; `markupRef` is the applied markup it started from.
+  let markupSession = $state<{ id: number; sourceId: string; markupRef: string | null } | null>(null);
+  let markupSessionSeq = 0;
+  let markupFileInput = $state<HTMLInputElement>();
+  // Current full-page index (0 = workspace, 1 = gallery); mirrors the
+  // controller so the bottom-center page indicator stays in sync.
+  let fpPage = $state(0);
+  let editPicker: EditSourcePicker | undefined = $state();
+  let galleryEditImage = $state<GalleryEntry | null>(null);
+  let galleryEditDialogOpen = $state(false);
+  let assetPackPickerOpen = $state(false);
+  let editPreviewUrl = $state('');
+  let editPreviewLabel = $state('');
+  let jobDiagnoses = $state<Record<string, AssistantJobDiagnoseResponse>>({});
+  const hasEditSource = $derived(editSourceCount($editSourceStore) > 0);
+  const hasEditMask = $derived(Boolean($editSourceStore.mask));
+  const editSources = $derived.by(() => {
+    const state = $editSourceStore;
+    const primaryId = primaryEditSourceId(state);
+    const mask = state.mask;
+    return state.sources.map((source) => ({
+      id: source.id,
+      label: source.label || source.previewLabel,
+      previewUrl: source.previewUrl,
+      // The picker keeps its own vocabulary: the gallery primary is just 'gallery'.
+      kind: source.kind === 'gallery_primary' ? ('gallery' as const) : source.kind,
+      imageId: 'imageId' in source ? source.imageId : undefined,
+      isPrimary: source.id === primaryId,
+      maskCoverage: mask && mask.sourceId === source.id ? mask.coverage : null,
+      maskOrigin: mask && mask.sourceId === source.id ? mask.origin : null
+    }));
+  });
+  const primaryEditSource = $derived.by(() => {
+    const first = selectPrimaryEditSource($editSourceStore);
+    return first
+      ? { id: first.id, kind: first.kind, label: first.label || first.previewLabel, previewUrl: first.previewUrl, width: first.width, height: first.height }
+      : null;
+  });
+  const activeEditMask = $derived(isMaskValid($editSourceStore) ? $editSourceStore.mask : null);
+  const markupSupportedPrimary = $derived(Boolean(primaryEditSource && primaryEditSource.kind !== 'gallery_reference'));
+  // Markup needs a 2.6 model, an editable primary image (upload or gallery primary,
+  // never a bare reference), and (for async providers) the provider's `markup` capability.
+  const markupAvailable = $derived(
+    isImage26(promptForm.model) &&
+      markupSupportedPrimary &&
+      ($settingsStore.settings?.provider_kind !== 'async_json' || Boolean($settingsStore.settings?.provider_capabilities?.markup))
+  );
+  $effect(() => {
+    if ($editSourceStore.markup && (!isImage26(promptForm.model) || ($settingsStore.settings?.provider_kind === 'async_json' && !$settingsStore.settings?.provider_capabilities?.markup))) {
+      editSourceStore.removeMarkup();
+      showToast($t.promptForm.markupUnavailable, 'status');
+    }
+  });
+  // Subscribe once to the store's discard-notice channel so invalidated mask
+  // or markup layers surface a toast without diffing per-kind counters.
+  $effect(() => {
+    const notice = $editSourceDiscards;
+    if (!notice) return;
+    untrack(() => {
+      showToast(notice.kind === 'markup' ? $t.markupEditor.discarded : $t.messages.editMaskDiscarded);
+    });
+  });
+  // The drawing session is bound to one primary image and one capability set.
+  // If either goes away while the editor is open, the session is invalidated:
+  // the editor closes, its working copy is released, and a late export is refused.
+  $effect(() => {
+    const session = markupSession;
+    if (!session) return;
+    // A changed or removed primary image is reported as such even though it also
+    // makes `markupAvailable` false; only a real capability loss says "unavailable".
+    if (primaryEditSourceId($editSourceStore) !== session.sourceId) {
+      closeMarkupEditor();
+      showToast($t.markupEditor.closedSourceChanged, 'status');
+    } else if (!markupAvailable) {
+      closeMarkupEditor();
+      showToast($t.markupEditor.closedUnavailable, 'status');
+    }
+  });
+  const maskSupported = $derived($settingsStore.settings?.supports_mask !== false);
+  const activeJobsCount = $derived($jobsStore.jobs.length);
+  const optimizerSettings = $derived($settingsStore.settings?.prompt_optimizer || null);
+  const promptOptimizerConfigAvailable = $derived(
+    Boolean(
+      optimizerSettings?.api_url.trim() &&
+        optimizerSettings.model.trim() &&
+        optimizerSettings.has_api_key
+    )
+  );
+  const aiAssistantSettings = $derived($settingsStore.settings?.ai_assistant || null);
+  const aiAssistantAvailable = $derived(
+    Boolean(
+      aiAssistantSettings?.enabled &&
+        promptOptimizerConfigAvailable &&
+        (aiAssistantSettings.vision_model.trim() || optimizerSettings?.model.trim())
+    )
+  );
+  const optimizerAvailable = $derived(aiAssistantAvailable);
+  const agentAvailable = $derived(Boolean(aiAssistantAvailable && aiAssistantSettings?.agent_enabled));
+  const r2BackupSettings = $derived($settingsStore.settings?.r2_backup || null);
+  const r2BackupAvailable = $derived(
+    Boolean(
+      r2BackupSettings?.enabled &&
+        r2BackupSettings.endpoint_url.trim() &&
+        r2BackupSettings.bucket_name.trim() &&
+        r2BackupSettings.has_access_key_id &&
+        r2BackupSettings.has_secret_access_key
+    )
+  );
+  const nodeImageSettings = $derived($settingsStore.settings?.nodeimage || null);
+  const nodeImageAvailable = $derived(
+    Boolean(nodeImageSettings?.enabled && nodeImageSettings.api_key_resolvable)
+  );
+
+  const urlSync = createUrlSyncScheduler((mode) => {
+    writePageUrl(
+      {
+        page: $galleryStore.page,
+        filters: $galleryStore.filters,
+        imageId: $lightboxStore.image?.id || null,
+        jobsTab: $uiStore.jobsOpen ? jobsTab : null,
+        mode: $workspaceModeStore.mode,
+        conversationId: $workspaceModeStore.conversationId
+      },
+      mode
+    );
+  });
+  const lightboxController = createLightboxController({
+    getImage: () => $lightboxStore.image,
+    getGallery: () => $galleryStore.gallery,
+    isAiAvailable: () => aiAssistantAvailable,
+    setImage: lightboxStore.setImage,
+    loadGalleryPage: (page, direction) => galleryStore.loadGallery(page, false, direction),
+    prefetchPage: (page) => galleryStore.prefetchGalleryPage(page, 'next'),
+    loadAiMetadata: assistantStore.loadGalleryMetadata,
+    describeImage: assistantStore.describeGalleryImage,
+    analyzeImage: assistantStore.analyzeGalleryImage,
+    isAbortError,
+    onNavigate: () => urlSync.schedule('replace'),
+    onImageNotFound: () => showToast($t.messages.galleryImageNotFound, 'error'),
+    onAnalyzed: () => showToast($t.messages.aiAssistantGalleryAnalyzed),
+    onError: showError
+  });
+
+  const editSession = createEditSession({
+    confirm: confirmStore.confirm,
+    toast: (message, variant) => showToast(message, variant)
+  });
+
+  const {
+    loadingPanel,
+    ensurePanel,
+    prefetchPanel,
+    rememberPanelFocus,
+    restorePanelFocus,
+    openPanel: openUiPanel,
+    closePanel: closeUiPanel,
+    reset: resetPanels
+  } = createPanelController(showToast);
+
+  // Keep the lightbox navigation state and neighbor prefetch in step with the
+  // stores it reads; only these three values may trigger a re-sync.
+  $effect(() => {
+    lightboxController.sync($lightboxStore.image, $galleryStore.gallery, aiAssistantAvailable);
+  });
+  // Track the active preset's defaults without re-running on form keystrokes;
+  // the controller reads/writes form fields inside untrack.
+  $effect(() => {
+    promptForm.applyPresetDefaults($settingsStore.settings);
+  });
+  // The active preset can be switched to one whose gateway ignores masks; drop
+  // any stored mask so it cannot be submitted against a preset that ignores it.
+  $effect(() => {
+    if (!maskSupported && $editSourceStore.mask) {
+      editSourceStore.removeMask();
+      showToast($t.messages.editMaskPresetUnsupported, 'status');
+    }
+  });
+
+  async function loadInitialData() {
+    await Promise.all([settingsStore.loadSettings(), jobsStore.loadJobs(), applyUrlStateToApp()]);
+    const activeJob = $jobsStore.jobs[0];
+    if (activeJob) {
+      // Resume the newest active job as this page's preview group.
+      generationSession.resumeJob(activeJob);
+    }
+    urlSync.setReady();
+    urlSync.flush();
+    jobsStore.startJobsEvents();
+    if ($settingsPrefillStore || $presetShareStore) void openUiPanel('settings', 'settingsOpen');
+  }
+
+  async function loadAuthenticatedData() {
+    await Promise.all([versionStore.loadVersion(), loadInitialData()]);
+  }
+
+  function showToast(message: string, variant?: 'status' | 'error', options?: ToastOptions) {
+    uiStore.showToast(message, variant, options);
+  }
+
+  function errorMessage(error: unknown, fallback = $t.messages.requestFailed) {
+    const message = error instanceof Error ? error.message : fallback;
+    return message || fallback;
+  }
+
+  function showError(error: unknown, fallback = $t.messages.requestFailed) {
+    showToast(errorMessage(error, fallback), 'error');
+  }
+
+  function syncAfterGalleryMutation(mode: 'replace' | 'push' = 'replace', debounceMs = 0) {
+    urlSync.schedule(mode, debounceMs);
+  }
+
+  async function syncLightboxFromUrl(imageId: string | null | undefined) {
+    const nextImageId = String(imageId || '').trim();
+    if (!nextImageId) {
+      lightboxController.close();
+      return;
+    }
+
+    if (!(await ensurePanel('lightbox'))) return;
+    await lightboxController.openFromId(nextImageId, $galleryStore.gallery?.images || []);
+  }
+
+  async function openLightbox(image: GalleryEntry) {
+    rememberPanelFocus('lightbox');
+    if (!(await ensurePanel('lightbox'))) return;
+    lightboxController.open(image);
+    urlSync.schedule('push');
+  }
+
+  function zoomInPreview() {
+    const slot = $previewStore.selectedSlot || $previewStore.slots.find((s) => s.image);
+    const img = slot?.image;
+    if (!img?.image_id) return;
+    void openLightbox({
+      id: img.image_id,
+      prompt: slot?.prompt || $previewStore.prompt || '',
+      size: slot?.job?.size || '',
+      model: slot?.job?.model || '',
+      filename: img.filename || '',
+      image_url: img.image_url,
+      thumbnail_url: img.image_url,
+      thumbnail_status: 'ready',
+      created_at: slot?.job?.created_at || new Date().toISOString(),
+      image_width: img.image_width || null,
+      image_height: img.image_height || null,
+      favorite: false,
+      bytes: null
+    });
+  }
+
+  function closeLightbox() {
+    lightboxController.close();
+    urlSync.schedule('replace');
+    restorePanelFocus('lightbox');
+  }
+
+  async function saveRefToCollection(_sourceId: string, imageId?: string) {
+    const collections = $galleryCollectionsStore.collections;
+    const target = defaultCollection(collections) || collections[0];
+    if (!target) {
+      showToast($t.promptForm.saveCollectionNoCollections, 'error');
+      return;
+    }
+    if (imageId) {
+      // Gallery reference already has a server id: add it directly.
+      try {
+        const result = await galleryCollectionsStore.addItems(target.id, { ids: [imageId] });
+        showToast(result.changed_count ? $t.promptForm.savedToCollection(target.name) : $t.collections.alreadyIn(target.name));
+      } catch (error) {
+        showToast(error instanceof Error ? error.message : $t.promptForm.saveCollectionFailed, 'error');
+      }
+      return;
+    }
+    // Uploaded reference has no server id yet. Wrap the File into a
+    // single-image import archive with a known id, import it into the
+    // gallery, then add that id to the collection.
+    const source = $editSourceStore.sources.find((s) => s.id === _sourceId);
+    if (source?.kind !== 'upload') {
+      showToast($t.promptForm.saveCollectionNoCollections, 'error');
+      return;
+    }
+    try {
+      const newId = crypto.randomUUID();
+      const zip = await singleImageImportZip(source.file, newId);
+      const form = new FormData();
+      form.append('archive', new Blob([zip.buffer as ArrayBuffer], { type: 'application/zip' }), 'import.zip');
+      const importRes = await fetch('/api/import', { method: 'POST', body: form, credentials: 'same-origin' });
+      const importBody = await importRes.json().catch(() => ({}));
+      if (!importRes.ok) throw new Error(importBody.detail || `import ${importRes.status}`);
+      // Import runs as an async job — poll until it reaches a terminal status
+      // so the new gallery id exists before we add it to the collection.
+      const jobId: string | undefined = importBody.job_id;
+      if (jobId) {
+        for (let attempt = 0; attempt < 60; attempt += 1) {
+          const statusRes = await fetch(`/api/gallery/import-jobs/${encodeURIComponent(jobId)}`, {
+            method: 'GET',
+            credentials: 'same-origin'
+          });
+          const status = await statusRes.json().catch(() => ({}));
+          if (status.status === 'success' || status.status === 'error') break;
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+      }
+      const result = await galleryCollectionsStore.addItems(target.id, { ids: [newId] });
+      await galleryStore.loadGallery($galleryStore.page).catch(() => {});
+      showToast(result.changed_count ? $t.promptForm.savedToCollection(target.name) : $t.collections.alreadyIn(target.name));
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : $t.promptForm.saveCollectionFailed, 'error');
+    }
+  }
+  function lightboxNavigationBlocked() {
+    return Boolean(
+      $confirmStore.request ||
+        $uiStore.editPreviewOpen ||
+        $uiStore.sizeDialogOpen ||
+        $uiStore.preferencesOpen ||
+        $uiStore.maskEditorOpen ||
+        $uiStore.markupEditorOpen ||
+        galleryEditDialogOpen ||
+        $uiStore.promptSnippetsOpen ||
+        $uiStore.imagePromptOpen ||
+        $uiStore.jobsOpen ||
+        $uiStore.settingsOpen
+    );
+  }
+
+  async function openJobsDrawer(tab: JobsTab = jobsTab) {
+    rememberPanelFocus('jobs');
+    if (!(await ensurePanel('jobs'))) return;
+    jobsTab = tab;
+    setUi('jobsOpen', true);
+    if (tab === 'history' && !$jobsStore.historyLoaded && !$jobsStore.historyLoading) {
+      void jobsStore.loadJobHistory();
+    } else if (tab === 'history' && $jobsStore.historyNeedsRefresh && !$jobsStore.historyLoading) {
+      void jobsStore.refreshHistoryIfLoaded();
+    }
+    urlSync.schedule();
+  }
+
+  function closeJobsDrawer() {
+    closeUiPanel('jobs', 'jobsOpen');
+    urlSync.schedule();
+  }
+
+  async function openPromptSnippetsDrawer() {
+    rememberPanelFocus('snippets');
+    if (!(await ensurePanel('snippets'))) return;
+    setUi('promptSnippetsOpen', true);
+    void loadPromptSnippets();
+  }
+
+  function closePromptSnippetsDrawer() {
+    closeUiPanel('snippets', 'promptSnippetsOpen');
+  }
+
+  async function openImagePromptDialog() {
+    await openUiPanel('imagePrompt', 'imagePromptOpen');
+  }
+
+  function closeImagePromptDialog() {
+    closeUiPanel('imagePrompt', 'imagePromptOpen');
+  }
+
+  function setJobsTab(tab: JobsTab) {
+    jobsTab = tab;
+    if (tab === 'history' && !$jobsStore.historyLoaded && !$jobsStore.historyLoading) {
+      void jobsStore.loadJobHistory();
+    } else if (tab === 'history' && $jobsStore.historyNeedsRefresh && !$jobsStore.historyLoading) {
+      void jobsStore.refreshHistoryIfLoaded();
+    }
+    urlSync.schedule();
+  }
+
+  async function applyUrlStateToApp() {
+    if (typeof window === 'undefined') return;
+    const url = new URL(window.location.href);
+    const { gallery: state, jobsTab: nextJobsTab, imageId, mode: nextMode, conversationId } = readPageUrl(url);
+
+    urlSync.setApplying(true);
+    try {
+      workspaceModeStore.apply({ mode: nextMode, conversationId: nextMode === 'agent' ? conversationId : null });
+      galleryStore.setPageAndFilters(state.page, state.filters);
+      jobsTab = nextJobsTab || 'running';
+      if (nextJobsTab && (await ensurePanel('jobs'))) setUi('jobsOpen', true);
+      else setUi('jobsOpen', false);
+
+      if (nextJobsTab === 'history' && !$jobsStore.historyLoaded && !$jobsStore.historyLoading) {
+        void jobsStore.loadJobHistory();
+      }
+
+      await galleryStore.loadGallery(state.page);
+      await syncLightboxFromUrl(imageId);
+    } finally {
+      urlSync.setApplying(false);
+    }
+    urlSync.schedule();
+  }
+
+  function changeWorkspaceMode(next: WorkspaceMode) {
+    if (next === $workspaceModeStore.mode) return;
+    workspaceModeStore.setMode(next);
+    urlSync.schedule('push');
+  }
+
+  function changeAgentConversation(id: string | null) {
+    workspaceModeStore.setConversation(id);
+    urlSync.schedule('replace');
+  }
+
+  // Agent mode is only offered while the assistant and Agent are both enabled.
+  $effect(() => {
+    if ($settingsStore.settings && $workspaceModeStore.mode === 'agent' && !agentAvailable) {
+      workspaceModeStore.apply({ mode: 'studio', conversationId: null });
+      urlSync.schedule('replace');
+    }
+  });
+
+  $effect(() => {
+    if ($workspaceModeStore.mode === 'agent') void agentViewPanel.prefetch();
+  });
+
+  // Paged full-page scrolling only makes sense for the studio workspace;
+  // agent mode keeps its own scroll behaviour. The first run is a harmless
+  // no-op (fpController is created later in onMount); mode changes re-run it.
+  $effect(() => {
+    const mode = $workspaceModeStore.mode;
+    if (mode === 'studio') fpController?.enable();
+    else fpController?.disable();
+  });
+
+  function setUi<K extends keyof typeof $uiStore>(key: K, value: (typeof $uiStore)[K]) {
+    uiStore.setKey(key, value);
+  }
+
+  function saveSettings(body: SettingsInput) {
+    void settingsStore.saveSettings(body, showToast).then((saved) => {
+      if (saved) setUi('settingsOpen', false);
+    });
+  }
+
+  function createPreset() {
+    void settingsStore.createPreset(showToast);
+  }
+
+  function applySettingsPrefill() {
+    const prefill = $settingsPrefillStore;
+    if (!prefill) return;
+    settingsPrefillStore.set(null);
+    void settingsStore.createPreset(showToast, {
+      ...(prefill.apiUrl ? { api_url: prefill.apiUrl } : {}),
+      ...(prefill.apiModel ? { default_model: prefill.apiModel } : {})
+    });
+  }
+
+  function dismissSettingsPrefill() {
+    settingsPrefillStore.set(null);
+  }
+
+  function downloadPresetPackage(packageValue: unknown) {
+    const blob = new Blob([JSON.stringify(packageValue, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `preset-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  async function exportPreset(presetId: string) {
+    if (!presetId) return;
+    try {
+      const packageValue = await settingsStore.exportPreset(presetId);
+      downloadPresetPackage(packageValue);
+      showToast($t.messages.presetExported);
+    } catch (error) {
+      showError(error);
+    }
+  }
+
+  async function sharePreset(presetId: string) {
+    if (!presetId) return;
+    try {
+      const packageValue = await settingsStore.exportPreset(presetId);
+      const link = buildPresetShareUrl(packageValue, window.location.href);
+      if (!link) {
+        showToast($t.messages.presetShareTooLarge, 'error');
+        return;
+      }
+      await copyText(link);
+      showToast($t.messages.presetShareCopied);
+    } catch (error) {
+      showError(error);
+    }
+  }
+
+  function reorderPresets(presetIds: string[]) {
+    void settingsStore.reorderPresets(presetIds, showToast).catch(showError);
+  }
+
+  function dismissPresetShare() {
+    presetShareStore.set(null);
+  }
+
+  function activatePreset(presetId: string) {
+    return settingsStore.activatePreset(presetId, showToast);
+  }
+
+  function deletePreset(presetId: string) {
+    return settingsStore.deletePreset(presetId, showToast);
+  }
+
+  function checkPresetHealth(presetId: string) {
+    void settingsStore.checkPresetHealth(presetId);
+  }
+
+  function checkR2Health(body: NonNullable<SettingsInput['r2_backup']>) {
+    void settingsStore.checkR2Health(body);
+  }
+
+  function checkAiAssistantHealth(body: AIAssistantSettingsInput) {
+    void settingsStore.checkAiAssistantHealth(body);
+  }
+
+  function clearAiAssistantHealth() {
+    settingsStore.clearAiAssistantHealth();
+  }
+
+  function clearPresetHealth() {
+    settingsStore.clearPresetHealth();
+  }
+
+  function loadPromptOptimizerSystemPrompt() {
+    return settingsStore.loadPromptOptimizerSystemPrompt();
+  }
+
+  function savePromptOptimizerSystemPrompt(systemPrompt: string) {
+    return settingsStore.savePromptOptimizerSystemPrompt(systemPrompt, showToast);
+  }
+
+  function loadOverallConfig() {
+    return settingsStore.loadOverallConfig();
+  }
+
+  function saveOverallConfig(body: OverallConfigUpdateRequest) {
+    return settingsStore.saveOverallConfig(body, showToast);
+  }
+
+  function showNewGalleryImagesToast() {
+    showToast($t.messages.newGalleryImagesAvailable, 'status', {
+      actionLabel: $t.common.refresh,
+      durationMs: 8000,
+      onAction: () => {
+        void galleryStore.loadGallery(1, false, 'jump', { lightweight: true });
+        syncAfterGalleryMutation();
+      }
+    });
+  }
+
+  const generationSession = createGenerationSession({
+    preview: previewStore,
+    jobs: jobsStore,
+    onGalleryRefresh: () => galleryStore.loadGallery(1, false, 'jump', { lightweight: true }),
+    onShowNewGalleryToast: showNewGalleryImagesToast,
+    isGalleryFirstPage: () => $galleryStore.page === 1
+  });
+
+  function generateImage(options?: SubmitOptions): Promise<boolean> {
+    promptForm.normalizeQuantityForSubmit();
+    return generationSession.submitGenerate(promptForm.snapshot(), options);
+  }
+
+  function editImage(options?: SubmitOptions): Promise<boolean> {
+    promptForm.normalizeQuantityForSubmit();
+    return generationSession.submitEdit(promptForm.snapshot(), $editSourceStore, options);
+  }
+
+  async function submitPrompt(): Promise<boolean> {
+    const submittedPrompt = promptForm.prompt;
+    const accepted = await (hasEditSource ? editImage() : generateImage());
+    // Only clear once the job was accepted, and never over text typed meanwhile.
+    if (accepted && $preferencesStore.clearPromptAfterSubmit && promptForm.prompt === submittedPrompt) {
+      promptForm.prompt = '';
+    }
+    return accepted;
+  }
+
+  async function planEdit() {
+    const goal = promptForm.prompt.trim();
+    if (!goal) {
+      previewStore.setError($t.messages.promptRequired);
+      return;
+    }
+    try {
+      const previousPrompt = promptForm.prompt;
+      const previousSize = promptForm.size;
+      const plan = await assistantStore.planEdit({
+        goal,
+        source_count: editSourceCount($editSourceStore),
+        has_mask: Boolean(activeEditMask),
+        current_prompt: promptForm.prompt,
+        target_size: promptForm.size
+      });
+      if (plan.edit_prompt) {
+        promptForm.prompt = plan.edit_prompt;
+        if (plan.suggested_size) promptForm.size = plan.suggested_size;
+      }
+      showToast($t.messages.aiAssistantEditPlanReady, 'status', {
+        actionLabel: $t.common.undo,
+        onAction: () => {
+          promptForm.prompt = previousPrompt;
+          promptForm.size = previousSize;
+        },
+        durationMs: 8000
+      });
+    } catch (error) {
+      showError(error);
+    }
+  }
+
+  function setGalleryFilter(key: Parameters<typeof galleryStore.updateFilter>[0], value: Parameters<typeof galleryStore.updateFilter>[1]) {
+    galleryStore.updateFilter(key, value);
+    syncAfterGalleryMutation('replace', key === 'prompt' ? 300 : 0);
+  }
+
+  function resetGalleryFilters() {
+    galleryStore.resetFilters();
+    syncAfterGalleryMutation();
+  }
+
+  function loadGalleryPage(page: number, direction?: 'next' | 'prev' | 'jump') {
+    void galleryStore.loadGallery(page, false, direction);
+    syncAfterGalleryMutation();
+  }
+
+  function loadGalleryStats() {
+    void galleryStore.loadGallery($galleryStore.page, true);
+  }
+
+  async function loadPromptSnippets(query = '') {
+    try {
+      await promptSnippetsStore.loadSnippets(query);
+    } catch (error) {
+      showError(error);
+    }
+  }
+
+  async function createPromptSnippet(input: PromptSnippetCreateInput) {
+    try {
+      await promptSnippetsStore.createSnippet(input);
+      showToast($t.messages.promptSnippetSaved);
+    } catch (error) {
+      showError(error);
+    }
+  }
+
+  async function updatePromptSnippet(snippetId: string, input: PromptSnippetUpdateInput) {
+    try {
+      await promptSnippetsStore.updateSnippet(snippetId, input);
+      showToast($t.messages.promptSnippetUpdated);
+    } catch (error) {
+      showError(error);
+    }
+  }
+
+  async function deletePromptSnippet(snippet: PromptSnippet) {
+    const confirmed = await confirmStore.confirm({
+      title: $t.confirm.deleteSnippetTitle,
+      message: $t.confirm.deleteSnippetMessage(snippet.title),
+      confirmLabel: $t.common.delete,
+      cancelLabel: $t.confirm.cancel,
+      closeLabel: $t.confirm.closeLabel,
+      variant: 'danger'
+    });
+    if (!confirmed) return;
+    try {
+      await promptSnippetsStore.deleteSnippet(snippet.id);
+      showToast($t.messages.promptSnippetDeleted);
+    } catch (error) {
+      showError(error);
+    }
+  }
+
+  function usePromptSnippet(snippet: PromptSnippet) {
+    promptForm.prompt = snippet.prompt;
+    closePromptSnippetsDrawer();
+    showToast($t.messages.promptSnippetLoaded);
+  }
+
+  async function copyPromptSnippet(snippet: PromptSnippet) {
+    await copyText(snippet.prompt);
+    showToast($t.messages.promptSnippetCopied);
+  }
+
+  function applyImagePrompt(prompt: string) {
+    promptForm.prompt = prompt;
+    showToast($t.messages.aiAssistantPromptApplied);
+  }
+
+  async function saveImagePrompt(prompt: string) {
+    try {
+      await promptSnippetsStore.createSnippet({
+        title: $t.imagePrompt.snippetTitle,
+        prompt,
+        favorite: true
+      });
+      showToast($t.messages.promptSnippetSaved);
+    } catch (error) {
+      showError(error);
+      throw error;
+    }
+  }
+
+  async function copyImagePrompt(prompt: string) {
+    try {
+      await copyText(prompt);
+      showToast($t.messages.promptSnippetCopied);
+    } catch (error) {
+      showError(error);
+    }
+  }
+
+  function insertAssistantPrompt(prompt: string) {
+    const currentPrompt = promptForm.prompt.trimEnd();
+    promptForm.prompt = currentPrompt ? `${currentPrompt}\n${prompt}` : prompt;
+    showToast($t.messages.aiAssistantPromptInserted);
+  }
+
+  async function saveAssistantSnippet(prompt: string) {
+    try {
+      await promptSnippetsStore.createSnippet({
+        title: $t.aiAssistant.snippetTitle,
+        prompt,
+        favorite: true
+      });
+      showToast($t.messages.promptSnippetSaved);
+    } catch (error) {
+      showError(error);
+    }
+  }
+
+  function applyAssistantParams(recommendation: AssistantRecommendParamsResponse) {
+    const updates: Partial<PromptFormState> = {};
+    if (recommendation.model_name?.trim()) updates.model = recommendation.model_name.trim();
+    if (promptForm.apiPath === '/v1/images/generations') {
+      if (recommendation.size?.trim()) updates.size = recommendation.size.trim();
+      if (recommendation.quality) updates.quality = recommendation.quality;
+      if (recommendation.output_format) updates.outputFormat = recommendation.output_format;
+      if (recommendation.n) updates.quantity = recommendation.n;
+    }
+    if (!Object.keys(updates).length) return;
+    promptForm.patch(updates);
+    showToast($t.messages.aiAssistantParamsApplied);
+  }
+
+  function regenerate() {
+    previewStore.regenerate(
+      (next) => promptForm.replace({ ...next, model: next.model.trim() || promptForm.presetDefaultModel || initialPromptFormState.model }),
+      generateImage,
+      editImage
+    );
+  }
+
+  function clearPreview() {
+    generationSession.clearPreview();
+  }
+
+  function openGalleryEditDialog(image: GalleryEntry) {
+    if (/\.(svg|gif)$/i.test(image.filename)) { showToast($t.promptForm.rasterOnly, 'error'); return; }
+    void editGalleryDialogPanel.prefetch();
+    galleryEditImage = image;
+    galleryEditDialogOpen = true;
+  }
+
+  function closeGalleryEditDialog() {
+    galleryEditDialogOpen = false;
+    galleryEditImage = null;
+  }
+
+  function focusPromptAfterGalleryEdit() {
+    if (typeof window === 'undefined') return;
+    window.setTimeout(() => {
+      const prompt = document.getElementById('prompt');
+      if (!(prompt instanceof HTMLElement)) return;
+      prompt.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      prompt.focus();
+    }, 0);
+  }
+
+  function applyGalleryEditChoice(reusePrompt: boolean) {
+    const image = galleryEditImage;
+    if (!image) return;
+    const nextLabel = $t.messages.galleryEditLabel(image.filename);
+    if (
+      !editSourceStore.setGallerySource(
+        image.id,
+        nextLabel,
+        imageUrl(image.filename, image.image_url),
+        nextLabel,
+        previewStore.setError,
+        image.image_width || 0,
+        image.image_height || 0,
+        image.filename
+      )
+    ) {
+      showToast($t.messages.editSourceLimit(MAX_EDIT_SOURCE_IMAGES), 'error');
+      closeGalleryEditDialog();
+      return;
+    }
+    const nextForm = galleryEntryToEditForm(image, promptForm.presetDefaultModel, promptForm.apiPath);
+    promptForm.replace(reusePrompt ? nextForm : { ...nextForm, prompt: '' });
+    closeGalleryEditDialog();
+    closeLightbox();
+    focusPromptAfterGalleryEdit();
+    showToast($t.messages.galleryImageReady);
+  }
+
+  function handleEditFile(event: Event) {
+    editSourceStore.handleFile(event, previewStore.setError);
+  }
+
+  function handleEditFiles(files: File[]) {
+    const addedCount = editSourceStore.addFiles(files, previewStore.setError);
+    if (addedCount > 0) showToast($t.messages.editSourceFromDropAdded);
+  }
+
+  function handleAddAssetPackReferences(refs: EditGalleryReferenceSource[]) {
+    const addedCount = editSourceStore.addGalleryReferences(refs, previewStore.setError);
+    if (addedCount > 0) {
+      if (addedCount < refs.length) {
+        showToast($t.collections.referencesTruncated(addedCount));
+      } else {
+        showToast($t.collections.referencesAdded(addedCount));
+      }
+    }
+  }
+
+  function sourcePreviewModalUrl(source: { kind: string; previewUrl: string; filename?: string }) {
+    return source.kind !== 'upload' && source.filename ? imageUrl(source.filename) : source.previewUrl;
+  }
+
+  async function openEditPreview(sourceId: string) {
+    rememberPanelFocus('editPreview');
+    const source = findEditSource($editSourceStore, sourceId);
+    const previewUrl = source ? sourcePreviewModalUrl(source) : '';
+    if (!source || !previewUrl) return;
+    editPreviewUrl = previewUrl;
+    editPreviewLabel = source.previewLabel || source.label;
+    if (await ensurePanel('editPreview')) setUi('editPreviewOpen', true);
+  }
+
+  function closeEditPreview() {
+    setUi('editPreviewOpen', false);
+    editPreviewUrl = '';
+    editPreviewLabel = '';
+    restorePanelFocus('editPreview');
+  }
+
+  async function openMaskEditor(sourceId: string) {
+    if (!maskSupported) return;
+    if (sourceId !== primaryEditSourceId($editSourceStore)) return;
+    rememberPanelFocus('maskEditor');
+    if (!(await ensurePanel('maskEditor'))) return;
+    setUi('maskEditorOpen', true);
+  }
+
+  function closeMaskEditor() {
+    closeUiPanel('maskEditor', 'maskEditorOpen');
+  }
+
+  async function applyEditMask(mask: EditMask) {
+    await editSession.applyEditMask(mask, { onApplied: closeMaskEditor });
+  }
+
+  async function openMarkupEditor() {
+    if (!markupAvailable || !primaryEditSource || $uiStore.markupEditorOpen) return;
+    rememberPanelFocus('markupEditor');
+    if (!(await ensurePanel('markupEditor'))) return;
+    // Availability and the primary image may have changed while the chunk loaded.
+    const source = primaryEditSource;
+    if (!markupAvailable || !source) return;
+    markupSession = { id: ++markupSessionSeq, sourceId: source.id, markupRef: $editSourceStore.markup?.previewUrl ?? null };
+    setUi('markupEditorOpen', true);
+  }
+
+  function closeMarkupEditor() {
+    markupSession = null;
+    closeUiPanel('markupEditor', 'markupEditorOpen');
+  }
+
+  async function applyPaintedMarkup(payload: MarkupApplyPayload): Promise<boolean> {
+    const session = markupSession;
+    return editSession.applyPaintedMarkup(payload, {
+      expectedMarkupRef: session?.markupRef ?? null,
+      isEditorCurrent: () =>
+        Boolean(
+          session &&
+            markupSession?.id === session.id &&
+            payload.sessionId === session.id &&
+            payload.sourceId === session.sourceId &&
+            $uiStore.markupEditorOpen &&
+            markupAvailable
+        ),
+      onApplied: closeMarkupEditor
+    });
+  }
+
+  function removeMarkupFromEditor() {
+    editSourceStore.removeMarkup();
+    showToast($t.markupEditor.removed);
+    closeMarkupEditor();
+  }
+
+  function removeEditMask() {
+    editSourceStore.removeMask();
+  }
+
+  // Saving "no mask" from inside the editor is an explicit removal chosen by
+  // the user, not a stale-mask discard.
+  function removeMaskFromEditor() {
+    editSourceStore.removeMask();
+    showToast($t.messages.editMaskRemoved);
+    closeMaskEditor();
+  }
+
+  function clearEditSource() {
+    editSourceStore.clear();
+    editPicker?.reset();
+    closeEditPreview();
+  }
+
+  function removeEditSource(sourceId: string) {
+    const source = findEditSource($editSourceStore, sourceId);
+    const label = source ? source.label || source.previewLabel : '';
+    const previewUrl = source ? sourcePreviewModalUrl(source) : '';
+    if (!editSourceStore.remove(sourceId)) return;
+    if (previewUrl && editPreviewUrl === previewUrl) closeEditPreview();
+    showToast($t.messages.editSourceRemoved(label));
+  }
+
+  async function batchFavoriteGallery(favorite: boolean) {
+    await galleryStore.batchFavorite(favorite, showToast, (ids, nextFavorite) => {
+      ids.forEach((id) => lightboxStore.updateFavorite(id, nextFavorite));
+    });
+  }
+
+  function syncEditSourcesAfterGalleryDelete(deletedIds?: string[]) {
+    editSourceStore.removeGallerySourcesByImageIds(deletedIds);
+    if (editPreviewUrl && !$editSourceStore.sources.some((source) => sourcePreviewModalUrl(source) === editPreviewUrl)) {
+      closeEditPreview();
+    }
+  }
+
+  async function batchDeleteGallery() {
+    await galleryStore.batchDelete(showToast, (ids) => {
+      if ($lightboxStore.image && ids.includes($lightboxStore.image.id)) closeLightbox();
+      syncEditSourcesAfterGalleryDelete(ids);
+    });
+  }
+
+  async function batchAnalyzeGallery() {
+    let batchBody = galleryStore.selectedBatchRequestBody();
+    let selectedCount = $galleryStore.selectionToken?.count || $galleryStore.selectedIds.size;
+    if (!selectedCount) return;
+    let skippedSvgCount = 0;
+    if (batchBody.ids?.length) {
+      const svgIds = new Set(
+        ($galleryStore.gallery?.images || []).filter((img) => isSvgMedia(img)).map((img) => img.id)
+      );
+      if (svgIds.size > 0) {
+        const filteredIds = batchBody.ids.filter((id) => !svgIds.has(id));
+        if (!filteredIds.length) {
+          showToast($t.messages.svgAnalysisUnsupported, 'error');
+          return;
+        }
+        skippedSvgCount = batchBody.ids.length - filteredIds.length;
+        batchBody = { ...batchBody, ids: filteredIds };
+        selectedCount = filteredIds.length;
+      }
+    }
+    galleryActivityStore.setOperationStatus({
+      kind: 'ai_analyze',
+      label: $t.gallery.aiAnalyzing,
+      detail: $t.gallery.aiAnalyzePreparing(selectedCount),
+      progress: 0
+    });
+    try {
+      const job = await assistantStore.batchAnalyzeGallery({ ...batchBody, target_language: $language });
+      const currentJob = await waitForGalleryAnalysis(
+        job,
+        (nextJob) => {
+          galleryActivityStore.setOperationStatus({
+            kind: 'ai_analyze',
+            label: $t.gallery.aiAnalyzing,
+            detail: $t.gallery.aiAnalyzeProgress(
+              nextJob.analyzed_count,
+              nextJob.requested_count,
+              nextJob.failed_count,
+              nextJob.missing_count
+            ),
+            progress: nextJob.progress
+          });
+        }
+      );
+      galleryActivityStore.setOperationStatus({
+        kind: 'ai_analyze',
+        label: $t.gallery.aiAnalyzing,
+        detail: $t.gallery.aiAnalyzeComplete(currentJob.analyzed_count, currentJob.failed_count, currentJob.missing_count),
+        progress: 100
+      });
+      galleryStore.clearSelection();
+      // Filtered locally above, or skipped by the server when the whole filtered gallery was selected.
+      const serverSkipped = Math.max(
+        0,
+        currentJob.requested_count - currentJob.analyzed_count - currentJob.failed_count - currentJob.missing_count
+      );
+      const svgSkipped = skippedSvgCount + serverSkipped;
+      const summary = $t.gallery.aiAnalyzeComplete(
+        currentJob.analyzed_count,
+        currentJob.failed_count,
+        currentJob.missing_count
+      );
+      showToast(
+        svgSkipped > 0 ? `${summary} ${$t.gallery.aiAnalyzeSvgSkipped(svgSkipped)}` : summary,
+        currentJob.failed_count || currentJob.missing_count ? 'error' : 'status'
+      );
+    } catch (error) {
+      showError(error);
+    } finally {
+      galleryActivityStore.setOperationStatus(null);
+    }
+  }
+
+  function uploadGalleryImageToNodeImage(image: GalleryEntry) {
+    void nodeImageResultPanel.prefetch();
+    void galleryStore.uploadToNodeImage(image, showToast);
+  }
+
+  function batchUploadGalleryToNodeImage() {
+    void nodeImageResultPanel.prefetch();
+    void galleryStore.batchUploadToNodeImage(showToast);
+  }
+
+  async function toggleFavorite(image: GalleryEntry) {
+    await galleryStore.toggleFavorite(image, (next) => {
+      if ($lightboxStore.image?.id === image.id) lightboxStore.open(next);
+    });
+  }
+
+  async function deleteImage(image: GalleryEntry) {
+    await galleryStore.deleteImage(
+      image,
+      showToast,
+      () => {
+        if ($lightboxStore.image?.id === image.id) closeLightbox();
+      },
+      () => {
+        syncEditSourcesAfterGalleryDelete([image.id]);
+      }
+    );
+  }
+
+  async function deleteAllImages() {
+    await galleryStore.deleteAll(showToast, () => {
+      closeLightbox();
+      syncEditSourcesAfterGalleryDelete();
+      clearPreview();
+    });
+  }
+
+  async function importArchive(file: File) {
+    await galleryStore.importArchive(file, showToast);
+  }
+
+  async function exportArchive() {
+    await galleryStore.exportArchive(showToast);
+  }
+
+  async function syncGallery() {
+    if (!r2BackupAvailable) {
+      showToast($t.messages.r2BackupUnavailable, 'error');
+      return;
+    }
+    try {
+      await galleryStore.syncGallery(showToast);
+    } catch (error) {
+      showError(error);
+    }
+  }
+
+  async function copyPrompt(image: GalleryEntry) {
+    await copyText(image.prompt);
+    showToast($t.messages.promptCopied);
+  }
+
+  async function copyImageUrl(image: GalleryEntry) {
+    await copyText(new URL(imageUrl(image.filename, image.image_url), window.location.origin).href);
+    showToast($t.messages.imageUrlCopied);
+  }
+
+  function copyPromptBestEffort(prompt: string) {
+    if (!prompt) return;
+    void copyText(prompt).catch(() => {});
+  }
+
+  function useGalleryPrompt(image: GalleryEntry) {
+    promptForm.replace(galleryEntryToPromptOnly(image, promptForm.snapshot()));
+    copyPromptBestEffort(image.prompt);
+    closeLightbox();
+    showToast($t.messages.galleryPromptLoaded);
+  }
+
+  function useGalleryParams(image: GalleryEntry) {
+    const ignoredEditPath = image.api_path === '/v1/images/edits';
+    promptForm.replace(galleryEntryToPromptForm(image, promptForm.presetDefaultModel, promptForm.apiPath));
+    copyPromptBestEffort(image.prompt);
+    closeLightbox();
+    showToast(ignoredEditPath ? $t.messages.galleryEditApiPathIgnored : $t.messages.galleryParamsLoaded);
+  }
+
+  function useJobAsPrompt(job: GenerateJobStatus) {
+    promptForm.replace(jobToPromptForm(job, promptForm.presetDefaultModel));
+    closeJobsDrawer();
+    showToast($t.messages.jobLoadedIntoPrompt);
+  }
+
+  async function clearJobHistory() {
+    const confirmed = await confirmStore.confirm({
+      title: $t.confirm.clearJobHistoryTitle,
+      message: $t.confirm.clearJobHistoryMessage,
+      details: [$t.confirm.clearJobHistoryDetail],
+      confirmLabel: $t.common.clear,
+      cancelLabel: $t.confirm.cancel,
+      closeLabel: $t.confirm.closeLabel,
+      variant: 'danger'
+    });
+    if (!confirmed) return;
+
+    try {
+      await jobsStore.clearJobHistory();
+      showToast($t.messages.jobHistoryCleared);
+    } catch (error) {
+      showError(error);
+    }
+  }
+
+  function retryPresetOptions(job: GenerateJobStatus): SubmitOptions | undefined {
+    if (!$preferencesStore.retryUsesJobPreset) return undefined;
+    const presets = $settingsStore.settings?.presets || [];
+    const preset =
+      presets.find((candidate) => job.api_preset_id && candidate.id === job.api_preset_id) ||
+      presets.find((candidate) => job.api_preset_name && candidate.name === job.api_preset_name);
+    if (!preset) {
+      showToast($t.preferences.retryPresetMissing, 'status');
+      return undefined;
+    }
+    return { apiPresetId: preset.id };
+  }
+
+  async function retryJob(job: GenerateJobStatus) {
+    promptForm.replace(jobToPromptForm(job, promptForm.presetDefaultModel));
+    closeJobsDrawer();
+    const options = retryPresetOptions(job);
+    if (job.operation !== 'edit') {
+      void generateImage(options);
+      return;
+    }
+    if (!primaryRestoreSource($editSourceStore)) {
+      previewStore.setError($t.messages.editRetryNeedsSource);
+      showToast($t.messages.editRetryNeedsSource, 'error');
+      return;
+    }
+    editSourceStore.removeMarkup();
+    if (job.markup_applied) {
+      editSourceStore.removeMask();
+      const restoreSource = primaryRestoreSource($editSourceStore);
+      try {
+        if (!restoreSource) throw new Error('no restorable primary source');
+        const fetched = await editSession.fetchJobMaskBlob(job.job_id, restoreSource, 'markup');
+        await attachMarkup(fetched.blob, { origin: 'restored' });
+      } catch {
+        previewStore.setError($t.promptForm.markupRestoreFailed);
+        return;
+      }
+    }
+    if (job.mask_applied) {
+      // Clear any current selection before the identity check. A failed
+      // restore must never leave a mask available for this retry.
+      editSourceStore.removeMask();
+      const outcome = await editSession.restoreMaskFromJob(job);
+      if (outcome !== 'restored') {
+        showToast(outcome === 'mismatch' ? $t.messages.editRetryMaskMismatch : $t.messages.editRetryMaskMissing, 'error');
+        const sourceId = primaryEditSourceId($editSourceStore);
+        if (sourceId) await openMaskEditor(sourceId);
+        return;
+      }
+    } else if (isMaskValid($editSourceStore)) {
+      // The original task had no mask: never ride the current selection along.
+      editSourceStore.removeMask();
+      showToast($t.messages.editRetryMaskCleared, 'status');
+    }
+    void editImage(options);
+  }
+
+  async function diagnoseJob(job: GenerateJobStatus) {
+    try {
+      const diagnosis = await assistantStore.diagnoseJob(job.job_id);
+      jobDiagnoses = { ...jobDiagnoses, [job.job_id]: diagnosis };
+    } catch (error) {
+      showError(error);
+    }
+  }
+
+  // Paged full-page workspace controller (studio mode only). Created once in
+  // onMount; toggled on/off with the active mode and torn down on unmount.
+  let fpController: FullPageController | null = null;
+
+  onMount(() => {
+    const mainEl = document.getElementById('main-content');
+    if (mainEl) fpController = createFullPageController(mainEl as HTMLElement, (i) => { fpPage = i; });
+    // Read before any URL sync runs, then clear the one-shot parameters so a
+    // bookmark is never rewritten and popstate cannot re-apply them.
+    const pageUrl = new URL(window.location.href);
+    const prefill = readSettingsPrefill(pageUrl);
+    if (prefill) settingsPrefillStore.set(prefill);
+    const sharedPackage = readPresetShare(pageUrl);
+    if (sharedPackage) presetShareStore.set(sharedPackage);
+    const strippedUrl = stripPresetShare(pageUrl);
+    if (strippedUrl) {
+      window.history.replaceState(window.history.state, '', strippedUrl);
+    } else {
+      const strippedPrefillUrl = stripSettingsPrefill(pageUrl);
+      if (strippedPrefillUrl) window.history.replaceState(window.history.state, '', strippedPrefillUrl);
+    }
+
+    accessStore.installUnauthorizedHandler();
+    const initialData = loadAuthenticatedData();
+    void initialData.catch(() => undefined);
+    void accessStore.checkAccess(() => initialData);
+    // Loaded in its own chunk right after hydration so it stays out of the
+    // homepage dependency graph without leaving a long-lived gap.
+    void galleryGridPanel.prefetch();
+
+    // The mode $effect already ran once before the controller existed, so
+    // apply the current mode now that it is available.
+    if ($workspaceModeStore.mode === 'studio') fpController?.enable();
+
+    const openCompletion = async (event: Event) => {
+      const target = (event as CustomEvent<CompletionTarget>).detail;
+      if (target?.kind === 'agent') {
+        workspaceModeStore.apply({ mode: 'agent', conversationId: target.conversationId });
+        urlSync.schedule('push');
+        await agentViewPanel.prefetch();
+        await tick();
+        document.querySelector('[data-testid="agent-view"]')?.scrollIntoView({ block: 'start' });
+      } else if (target?.kind === 'job') {
+        try {
+          const opened = await generationSession.openJob(target.jobId, () => changeWorkspaceMode('studio'));
+          if (!opened) return;
+          await tick();
+          document.getElementById('preview-panel')?.scrollIntoView({ block: 'start' });
+        } catch (error) {
+          showToast(error instanceof Error ? error.message : $t.messages.jobLoadFailed, 'error');
+        }
+      }
+    };
+    window.addEventListener(OPEN_COMPLETION_EVENT, openCompletion);
+
+    const popstate = () => {
+      void applyUrlStateToApp();
+    };
+
+    const isEditableTarget = (target: EventTarget | null) => {
+      const element = target instanceof HTMLElement ? target : null;
+      return Boolean(element?.closest('input, textarea') || element?.isContentEditable);
+    };
+
+    const isBlockingDialogOpen = () =>
+      $uiStore.settingsOpen ||
+      $uiStore.promptSnippetsOpen ||
+      $uiStore.imagePromptOpen ||
+      $uiStore.sizeDialogOpen ||
+      $uiStore.preferencesOpen ||
+      $uiStore.maskEditorOpen ||
+      $uiStore.markupEditorOpen ||
+      galleryEditDialogOpen ||
+      Boolean($lightboxStore.image);
+
+    const paste = (event: ClipboardEvent) => {
+      if (isEditableTarget(event.target) || isBlockingDialogOpen()) return;
+
+      const files = extractImageFilesFromClipboard(event.clipboardData);
+      if (!files.length) return;
+
+      event.preventDefault();
+      const addedCount = editSourceStore.addFiles(files, previewStore.setError);
+      if (addedCount > 0) showToast($t.messages.editSourceFromClipboardAdded);
+    };
+
+    const keydown = (event: KeyboardEvent) => {
+      if (!$lightboxStore.image || lightboxNavigationBlocked()) return;
+      if (event.key === 'ArrowLeft' && $lightboxController.canNavigatePrevious) {
+        event.preventDefault();
+        void lightboxController.navigate(-1);
+      } else if (event.key === 'ArrowRight' && $lightboxController.canNavigateNext) {
+        event.preventDefault();
+        void lightboxController.navigate(1);
+      }
+    };
+    return installWorkspaceLifecycle({
+      onPopstate: popstate,
+      onKeydown: keydown,
+      onPaste: paste,
+      shouldPrefetch: canPrefetchNonCritical,
+      prefetchCommonPanels: () => {
+        prefetchPanel('settings');
+        prefetchPanel('jobs');
+        prefetchPanel('snippets');
+      },
+      cleanup: () => {
+        window.removeEventListener(OPEN_COMPLETION_EVENT, openCompletion);
+        fpController?.destroy();
+        fpController = null;
+        generationSession.dispose();
+        urlSync.destroy();
+        jobsStore.cleanup();
+        galleryStore.cleanup();
+        nodeImageResult.clear();
+        previewStore.cleanup();
+        uiStore.cleanup();
+        lightboxController.destroy();
+        resetPanels();
+      }
+    });
+  });
+</script>
+
+<svelte:head>
+  <title>GPT Image Panel</title>
+</svelte:head>
+
+<a class="skip-link control-focus" href="#main-content">{$t.common.skipToMain}</a>
+
+<AccessGate
+  visible={$accessStore.gateVisible}
+  error={$accessStore.error}
+  loading={$accessStore.loading}
+  turnstileEnabled={$accessStore.turnstileEnabled}
+  turnstileSiteKey={$accessStore.turnstileSiteKey}
+  onUnlock={(key, token) => accessStore.unlockAccess(key, token, loadAuthenticatedData)}
+/>
+<Header
+  version={$versionStore.version}
+  latestVersion={$versionStore.latestVersion}
+  hasVersionUpdate={$versionStore.hasUpdate}
+  releaseUrl={$versionStore.releaseUrl}
+  {activeJobsCount}
+  promptSnippetsOpen={$uiStore.promptSnippetsOpen}
+  imagePromptOpen={$uiStore.imagePromptOpen}
+  jobsOpen={$uiStore.jobsOpen}
+  settingsOpen={$uiStore.settingsOpen}
+  aiAssistantEnabled={aiAssistantAvailable}
+  {agentAvailable}
+  mode={$workspaceModeStore.mode}
+  onModeChange={changeWorkspaceMode}
+  onOpenPromptSnippets={openPromptSnippetsDrawer}
+  onOpenImagePrompt={openImagePromptDialog}
+  onOpenJobs={openJobsDrawer}
+  onOpenSettings={() => void openUiPanel('settings', 'settingsOpen')}
+  preferencesOpen={$uiStore.preferencesOpen}
+  onOpenPreferences={() => void openUiPanel('preferences', 'preferencesOpen')}
+  onPrefetchPromptSnippets={() => prefetchPanel('snippets')}
+  onPrefetchImagePrompt={() => prefetchPanel('imagePrompt')}
+  onPrefetchJobs={() => prefetchPanel('jobs')}
+  onPrefetchSettings={() => prefetchPanel('settings')}
+/>
+
+<ConfirmDialog request={$confirmStore.request} />
+{#if $nodeImageResultPanel.component}
+  {@const Panel = $nodeImageResultPanel.component}
+  <Panel />
+{/if}
+
+{#if $imagePromptPanel.component}
+{@const Panel = $imagePromptPanel.component}
+<Panel
+  open={$uiStore.imagePromptOpen}
+  available={aiAssistantAvailable}
+  onClose={closeImagePromptDialog}
+  onApply={applyImagePrompt}
+  onSave={saveImagePrompt}
+  onCopy={copyImagePrompt}
+/>
+{/if}
+
+{#if $settingsPanel.component}
+{@const Panel = $settingsPanel.component}
+<Panel
+  open={$uiStore.settingsOpen}
+  settings={$settingsStore.settings}
+  saving={$settingsActivityStore.saving}
+  health={$settingsActivityStore.health}
+  healthChecking={$settingsActivityStore.healthChecking}
+  r2Health={$settingsActivityStore.r2Health}
+  r2HealthChecking={$settingsActivityStore.r2HealthChecking}
+  aiAssistantHealth={$settingsActivityStore.aiAssistantHealth}
+  aiAssistantHealthChecking={$settingsActivityStore.aiAssistantHealthChecking}
+  onClose={() => closeUiPanel('settings', 'settingsOpen')}
+  onSave={saveSettings}
+  onCreate={createPreset}
+  prefill={$settingsPrefillStore}
+  onApplyPrefill={applySettingsPrefill}
+  onDismissPrefill={dismissSettingsPrefill}
+  sharePackage={$presetShareStore}
+  onSharePackageHandled={dismissPresetShare}
+  onExportPreset={exportPreset}
+  onSharePreset={sharePreset}
+  onReorderPresets={reorderPresets}
+  onActivate={activatePreset}
+  onDelete={deletePreset}
+  onHealthCheck={checkPresetHealth}
+  onClearPresetHealth={clearPresetHealth}
+  onR2HealthCheck={checkR2Health}
+  onAiAssistantHealthCheck={checkAiAssistantHealth}
+  onClearAiAssistantHealth={clearAiAssistantHealth}
+  onLoadPromptOptimizerSystemPrompt={loadPromptOptimizerSystemPrompt}
+  onSavePromptOptimizerSystemPrompt={savePromptOptimizerSystemPrompt}
+  onLoadOverallConfig={loadOverallConfig}
+  onSaveOverallConfig={saveOverallConfig}
+/>
+{/if}
+
+{#if $snippetsPanel.component}
+{@const Panel = $snippetsPanel.component}
+<Panel
+  open={$uiStore.promptSnippetsOpen}
+  snippets={$promptSnippetsStore.snippets}
+  loading={$promptSnippetsStore.loading}
+  saving={$promptSnippetsStore.saving}
+  onClose={closePromptSnippetsDrawer}
+  onSearch={loadPromptSnippets}
+  onCreate={createPromptSnippet}
+  onUpdate={updatePromptSnippet}
+  onDelete={deletePromptSnippet}
+  onUse={usePromptSnippet}
+  onCopy={copyPromptSnippet}
+/>
+{/if}
+
+{#if $jobsPanel.component}
+{@const Panel = $jobsPanel.component}
+<Panel
+  open={$uiStore.jobsOpen}
+  activeTab={jobsTab}
+  jobs={$jobsStore.jobs}
+  historyJobs={$jobsStore.historyJobs}
+  historyLoading={$jobsStore.historyLoading}
+  historyLoaded={$jobsStore.historyLoaded}
+  historyHasMore={$jobsStore.historyHasMore}
+  historyFailedOnly={$jobsStore.historyFailedOnly}
+  selectedIds={$jobsStore.selectedIds}
+  onClose={closeJobsDrawer}
+  onTabChange={setJobsTab}
+  onRefresh={jobsStore.loadJobs}
+  onRefreshHistory={jobsStore.loadJobHistory}
+  onLoadMoreHistory={jobsStore.loadMoreJobHistory}
+  onHistoryFailedOnlyChange={jobsStore.setHistoryFailedOnly}
+  onClearHistory={clearJobHistory}
+  onToggle={jobsStore.toggleSelection}
+  onToggleAll={jobsStore.toggleAll}
+  onCancelSelected={jobsStore.cancelSelected}
+  onUseJob={useJobAsPrompt}
+  onRetryJob={retryJob}
+  aiAssistantEnabled={aiAssistantAvailable}
+  diagnosingJobId={$assistantStore.diagnoseLoadingJobId}
+  diagnoses={jobDiagnoses}
+  onDiagnoseJob={diagnoseJob}
+/>
+{/if}
+
+<main id="main-content" tabindex="-1" class="fp-host mx-auto space-y-6 px-4 py-6 pb-28 sm:px-6 sm:pb-32">
+  <ToastHost toast={$toastStore} />
+
+  {#if $workspaceModeStore.mode === 'agent'}
+    {#if $agentViewPanel.component}
+      {@const Panel = $agentViewPanel.component}
+      <Panel
+        conversationId={$workspaceModeStore.conversationId}
+        onConversationChange={changeAgentConversation}
+        onImagesChanged={generationSession.scheduleGalleryRefresh}
+        onOpenGalleryImage={openLightbox}
+      />
+    {:else if $agentViewPanel.status === 'error'}
+      <p role="alert" class="status-error px-3 py-2 text-sm">{$t.messages.requestFailed}</p>
+    {/if}
+  {:else}
+    <section id="fp-workspace" class="fp-page">
+      <PromptForm
+      loading={$previewStore.loading}
+      optimizerEnabled={optimizerAvailable}
+      editPlannerEnabled={aiAssistantAvailable}
+      editPlanning={$assistantStore.editPlanLoading}
+      onSubmit={submitPrompt}
+      {hasEditSource}
+      {hasEditMask}
+      activeSubmissions={$previewStore.activeSubmissionCount}
+      onPlanEdit={planEdit}
+      onOpenSize={() => void openUiPanel('size', 'sizeDialogOpen')}
+    >
+      {#snippet editSource()}
+        <EditSourcePicker
+          bind:this={editPicker}
+          sources={editSources}
+          onChange={handleEditFile}
+          onDropFiles={handleEditFiles}
+          onPreview={openEditPreview}
+          onRemove={removeEditSource}
+          onClear={clearEditSource}
+          onEditMask={openMaskEditor}
+          onSaveRefToCollection={saveRefToCollection}
+          onRemoveMask={removeEditMask}
+          onOpenAssetPack={() => {
+            void assetPackPickerDialogPanel.prefetch();
+            assetPackPickerOpen = true;
+          }}
+          pasteBack={promptForm.pasteBack}
+          onPasteBackChange={(enabled: boolean) => {
+            promptForm.pasteBack = enabled;
+            try { localStorage.setItem(MASK_PASTE_BACK_PREF_KEY, String(enabled)); } catch { /* storage may be disabled */ }
+          }}
+          {maskSupported}
+        />
+        {#if markupAvailable && primaryEditSource}
+          <div class="mt-3 space-y-2">
+            <div class="flex flex-wrap items-center gap-2">
+              <button type="button" class="ui-button-primary" onclick={openMarkupEditor}>
+                {$editSourceStore.markup ? $t.promptForm.markupEdit : $t.promptForm.markupDraw}
+              </button>
+              <button type="button" class="ui-button" onclick={() => markupFileInput?.click()}>
+                {$editSourceStore.markup ? $t.promptForm.markupReplaceAction : $t.promptForm.markupUploadAction}
+              </button>
+              {#if $editSourceStore.markup}
+                <button type="button" class="ui-button" onclick={() => editSourceStore.removeMarkup()}>{$t.promptForm.removeMarkup}</button>
+              {/if}
+            </div>
+            <input
+              bind:this={markupFileInput}
+              type="file"
+              accept="image/png,.png"
+              class="sr-only"
+              tabindex="-1"
+              aria-hidden="true"
+              aria-label={$t.promptForm.markupUpload}
+              onchange={async (event) => {
+                const file = event.currentTarget.files?.[0];
+                event.currentTarget.value = '';
+                if (!file) return;
+                try {
+                  await attachMarkup(file, { confirmReplaceMask: editSession.confirmReplaceMask });
+                } catch (error) {
+                  previewStore.setError(error instanceof Error ? error.message : $t.promptForm.invalidMarkup);
+                }
+              }}
+            />
+            <p class="text-xs text-stone-500">{$t.promptForm.markupHint}</p>
+            {#if $editSourceStore.markup}
+              <div class="relative inline-block max-w-full overflow-hidden rounded-lg bg-stone-100">
+                <img src={primaryEditSource.previewUrl} alt={primaryEditSource.label} class="max-h-72 max-w-full object-contain" />
+                <img src={$editSourceStore.markup.previewUrl} alt={$t.promptForm.markupOverlay} class="absolute inset-0 h-full w-full object-contain" />
+              </div>
+            {/if}
+          </div>
+        {:else if isImage26(promptForm.model) && markupSupportedPrimary}
+          <p class="mt-2 text-sm text-stone-500">{$t.promptForm.markupUnavailable}</p>
+        {/if}
+      {/snippet}
+      {#snippet preview()}
+        <PreviewPanel onRegenerate={regenerate} onClear={clearPreview} aiAssistantEnabled={aiAssistantAvailable} onImageClick={zoomInPreview} />
+      {/snippet}
+    </PromptForm>
+    </section>
+  {/if}
+
+  {#if $galleryGridPanel.component}
+    {@const Panel = $galleryGridPanel.component}
+    <section id="fp-gallery" class="fp-page">
+    <Panel
+      canSyncR2={r2BackupAvailable}
+      canNodeImageUpload={nodeImageAvailable}
+      onFilter={setGalleryFilter}
+      onResetFilters={resetGalleryFilters}
+      onPage={loadGalleryPage}
+      onLoadMore={() => { void galleryStore.loadMoreGallery(); syncAfterGalleryMutation(); }}
+      onLoadStats={loadGalleryStats}
+      onFavorite={toggleFavorite}
+      onDelete={deleteImage}
+      onDeleteAll={deleteAllImages}
+      onImport={importArchive}
+      onExport={exportArchive}
+      onSync={syncGallery}
+      onOpen={openLightbox}
+      onEdit={openGalleryEditDialog}
+      onUsePrompt={useGalleryPrompt}
+      onUseAll={useGalleryParams}
+      onNodeImageUpload={uploadGalleryImageToNodeImage}
+      onBatchDelete={batchDeleteGallery}
+      onBatchFavorite={batchFavoriteGallery}
+      onBatchNodeImageUpload={batchUploadGalleryToNodeImage}
+      canAiAnalyze={aiAssistantAvailable}
+      onBatchAiAnalyze={batchAnalyzeGallery}
+    />
+    </section>
+  {/if}
+
+</main>
+
+{#if $lightboxPanel.component}
+{@const Panel = $lightboxPanel.component}
+<Panel
+  open={Boolean($lightboxStore.image)}
+  image={$lightboxStore.image}
+  onClose={closeLightbox}
+  onEdit={openGalleryEditDialog}
+  onFavorite={toggleFavorite}
+  onDelete={deleteImage}
+  onCopyPrompt={copyPrompt}
+  onCopyUrl={copyImageUrl}
+  onUsePrompt={useGalleryPrompt}
+  onUseAll={useGalleryParams}
+  canNavigatePrevious={$lightboxController.canNavigatePrevious}
+  canNavigateNext={$lightboxController.canNavigateNext}
+  navigating={$lightboxController.navigating}
+  aiAssistantEnabled={aiAssistantAvailable}
+  aiMetadata={$lightboxController.aiMetadata}
+  aiLoadingImageId={$assistantStore.galleryLoadingImageId}
+  onAiDescribe={lightboxController.describe}
+  onAiAnalyze={lightboxController.analyze}
+  onNavigatePrevious={() => lightboxController.navigate(-1)}
+  onNavigateNext={() => lightboxController.navigate(1)}
+/>
+{/if}
+
+{#if $editPreviewPanel.component}
+{@const Panel = $editPreviewPanel.component}
+<Panel
+  open={$uiStore.editPreviewOpen}
+  url={editPreviewUrl}
+  label={editPreviewLabel}
+  onClose={closeEditPreview}
+/>
+{/if}
+
+{#if $maskEditorPanel.component && primaryEditSource}
+  {@const Panel = $maskEditorPanel.component}
+  <Panel
+    open={$uiStore.maskEditorOpen}
+    sourceId={primaryEditSource.id}
+    imageUrl={primaryEditSource.previewUrl}
+    label={primaryEditSource.label}
+    size={promptForm.size}
+    existingMask={activeEditMask}
+    onApply={applyEditMask}
+    onRemove={removeMaskFromEditor}
+    onClose={closeMaskEditor}
+    onError={(message: string) => showToast(message, 'error')}
+    onNotice={(message: string) => showToast(message)}
+  />
+{/if}
+
+{#if $markupEditorPanel.component && primaryEditSource}
+  {@const Panel = $markupEditorPanel.component}
+  <Panel
+    open={$uiStore.markupEditorOpen && Boolean(markupSession)}
+    sessionId={markupSession?.id ?? 0}
+    sourceId={markupSession?.sourceId ?? primaryEditSource.id}
+    label={primaryEditSource.label}
+    existing={$editSourceStore.markup ?? null}
+    onApply={applyPaintedMarkup}
+    onRemove={removeMarkupFromEditor}
+    onClose={closeMarkupEditor}
+    onError={(message: string) => showToast(message, 'error')}
+  />
+{/if}
+
+{#if $editGalleryDialogPanel.component}
+  {@const Panel = $editGalleryDialogPanel.component}
+  <Panel
+    open={galleryEditDialogOpen}
+    image={galleryEditImage}
+    onChoose={applyGalleryEditChoice}
+    onClose={closeGalleryEditDialog}
+  />
+{/if}
+
+{#if $assetPackPickerDialogPanel.component}
+  {@const Panel = $assetPackPickerDialogPanel.component}
+  <Panel
+    open={assetPackPickerOpen}
+    onClose={() => { assetPackPickerOpen = false; }}
+    onAdd={handleAddAssetPackReferences}
+  />
+{/if}
+
+{#if $sizePanel.component}
+  {@const Panel = $sizePanel.component}
+  <Panel open={$uiStore.sizeDialogOpen} onClose={() => closeUiPanel('size', 'sizeDialogOpen')} />
+{/if}
+
+{#if $preferencesPanel.component}
+  {@const Panel = $preferencesPanel.component}
+  <Panel open={$uiStore.preferencesOpen} onClose={() => closeUiPanel('preferences', 'preferencesOpen')} />
+{/if}
+
+{#if $loadingPanel}
+  <div class="lazy-panel-status" role="status" aria-live="polite">
+    <span class="spinner" aria-hidden="true"></span>
+    <span>{$t.common.loadingFeature}</span>
+  </div>
+{/if}

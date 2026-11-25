@@ -1,23 +1,7 @@
-import { writable } from 'svelte/store';
+import { get, writable } from 'svelte/store';
 import { apiFetch } from '$lib/api/client';
-import type {
-  AssistantEditPlanRequest,
-  AssistantEditPlanResponse,
-  AssistantGalleryBatchJobStatus,
-  AssistantGalleryBatchRequest,
-  AssistantGalleryImageResponse,
-  AssistantGalleryMetadataResponse,
-  AssistantJobDiagnoseRequest,
-  AssistantJobDiagnoseResponse,
-  AssistantPromptCheckRequest,
-  AssistantPromptCheckResponse,
-  AssistantPromptRewriteRequest,
-  AssistantPromptRewriteResponse,
-  AssistantPromptVariantsRequest,
-  AssistantPromptVariantsResponse,
-  AssistantRecommendParamsRequest,
-  AssistantRecommendParamsResponse
-} from '$lib/api/types';
+import { language } from '$lib/i18n';
+import type { AssistantEditPlanRequest, AssistantEditPlanResponse, AssistantGalleryBatchJobStatus, AssistantGalleryBatchRequest, AssistantGalleryImageResponse, AssistantGalleryMetadataResponse, AssistantImagePromptOptimizeResponse, AssistantImagePromptResponse, AssistantJobDiagnoseRequest, AssistantJobDiagnoseResponse, AssistantPromptCheckRequest, AssistantPromptCheckResponse, AssistantPromptRewriteRequest, AssistantPromptRewriteResponse, AssistantPromptVariantsRequest, AssistantPromptVariantsResponse, AssistantRecommendParamsRequest, AssistantRecommendParamsResponse } from '$lib/api/types/assistant';
 
 export type AssistantState = {
   promptLoading: boolean;
@@ -29,7 +13,6 @@ export type AssistantState = {
   paramsLoadingCount: number;
   editPlanLoadingCount: number;
   galleryLoadingImageIds: string[];
-  batchJob: AssistantGalleryBatchJobStatus | null;
 };
 
 const initialAssistantState: AssistantState = {
@@ -41,13 +24,10 @@ const initialAssistantState: AssistantState = {
   promptLoadingCount: 0,
   paramsLoadingCount: 0,
   editPlanLoadingCount: 0,
-  galleryLoadingImageIds: [],
-  batchJob: null
+  galleryLoadingImageIds: []
 };
 
-export function isAbortError(error: unknown): boolean {
-  return error instanceof Error && error.name === 'AbortError';
-}
+export { isAbortError } from '$lib/utils/network';
 
 function createAssistantStore() {
   const { subscribe, update } = writable<AssistantState>(initialAssistantState);
@@ -237,6 +217,51 @@ function createAssistantStore() {
     }
   }
 
+  async function promptFromImage(file: File, targetLanguage: 'en' | 'zh-CN', signal?: AbortSignal) {
+    const requestSignal = operationSignal('imagePrompt', signal);
+    beginCounter('prompt');
+    const formData = new FormData();
+    formData.append('image', file, file.name);
+    formData.append('target_language', targetLanguage);
+    try {
+      return await apiFetch<AssistantImagePromptResponse>(
+        '/api/assistant/image/prompt',
+        {
+          method: 'POST',
+          signal: requestSignal,
+          body: formData
+        },
+        'reverse prompting uploaded image with AI Assistant'
+      );
+    } finally {
+      endCounter('prompt');
+      clearOperationSignal('imagePrompt', requestSignal);
+    }
+  }
+
+  async function optimizeImagePrompt(file: File, prompt: string, targetLanguage: 'en' | 'zh-CN', signal?: AbortSignal) {
+    const requestSignal = operationSignal('imagePromptOptimize', signal);
+    beginCounter('prompt');
+    const formData = new FormData();
+    formData.append('image', file, file.name);
+    formData.append('prompt', prompt);
+    formData.append('target_language', targetLanguage);
+    try {
+      return await apiFetch<AssistantImagePromptOptimizeResponse>(
+        '/api/assistant/image/prompt/optimize',
+        {
+          method: 'POST',
+          signal: requestSignal,
+          body: formData
+        },
+        'generating and comparing a reverse-prompt preview'
+      );
+    } finally {
+      endCounter('prompt');
+      clearOperationSignal('imagePromptOptimize', requestSignal);
+    }
+  }
+
   async function describeGalleryImage(imageId: string, signal?: AbortSignal) {
     const requestSignal = operationSignal(`gallery:describe:${imageId}`, signal);
     beginGalleryLoading(imageId);
@@ -252,27 +277,12 @@ function createAssistantStore() {
     }
   }
 
-  async function promptFromGalleryImage(imageId: string, signal?: AbortSignal) {
-    const requestSignal = operationSignal(`gallery:prompt:${imageId}`, signal);
-    beginGalleryLoading(imageId);
-    try {
-      return await apiFetch<AssistantGalleryImageResponse>(
-        `/api/assistant/gallery/${encodeURIComponent(imageId)}/prompt`,
-        { method: 'POST', signal: requestSignal },
-        'reverse prompting gallery image with AI Assistant'
-      );
-    } finally {
-      endGalleryLoading(imageId);
-      clearOperationSignal(`gallery:prompt:${imageId}`, requestSignal);
-    }
-  }
-
   async function analyzeGalleryImage(imageId: string, signal?: AbortSignal) {
     const requestSignal = operationSignal(`gallery:analyze:${imageId}`, signal);
     beginGalleryLoading(imageId);
     try {
       return await apiFetch<AssistantGalleryImageResponse>(
-        `/api/assistant/gallery/${encodeURIComponent(imageId)}/analyze`,
+        `/api/assistant/gallery/${encodeURIComponent(imageId)}/analyze?target_language=${encodeURIComponent(get(language))}`,
         { method: 'POST', signal: requestSignal },
         'analyzing gallery image with AI Assistant'
       );
@@ -291,7 +301,7 @@ function createAssistantStore() {
   }
 
   async function batchAnalyzeGallery(body: AssistantGalleryBatchRequest) {
-    const job = await apiFetch<AssistantGalleryBatchJobStatus>(
+    return apiFetch<AssistantGalleryBatchJobStatus>(
       '/api/assistant/gallery/batch/analyze',
       {
         method: 'POST',
@@ -300,18 +310,6 @@ function createAssistantStore() {
       },
       'starting gallery AI analysis'
     );
-    update((state) => ({ ...state, batchJob: job }));
-    return job;
-  }
-
-  async function loadBatchAnalyzeJob(jobId: string) {
-    const job = await apiFetch<AssistantGalleryBatchJobStatus>(
-      `/api/assistant/gallery/batch/analyze/${encodeURIComponent(jobId)}`,
-      {},
-      'loading gallery AI analysis job'
-    );
-    update((state) => ({ ...state, batchJob: job }));
-    return job;
   }
 
   function reset() {
@@ -328,12 +326,12 @@ function createAssistantStore() {
     recommendParams,
     diagnoseJob,
     planEdit,
+    promptFromImage,
+    optimizeImagePrompt,
     describeGalleryImage,
-    promptFromGalleryImage,
     analyzeGalleryImage,
     loadGalleryMetadata,
     batchAnalyzeGallery,
-    loadBatchAnalyzeJob,
     reset
   };
 }

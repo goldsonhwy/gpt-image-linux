@@ -1,0 +1,1 @@
+var e=e=>(e.setAttribute(`autocapitalize`,`none`),e.setAttribute(`autocorrect`,`off`),e.spellcheck=!1,{});export{e as t};

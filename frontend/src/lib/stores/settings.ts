@@ -2,19 +2,7 @@ import { get, writable } from 'svelte/store';
 import { apiFetch } from '$lib/api/client';
 import { t } from '$lib/i18n';
 import { confirmStore } from '$lib/stores/confirm';
-import type {
-  AIAssistantSettingsInput,
-  AssistantHealthResponse,
-  OverallConfigResponse,
-  OverallConfigUpdateRequest,
-  PresetHealthResponse,
-  PromptOptimizerHealthResponse,
-  PromptOptimizerSystemPromptResponse,
-  R2BackupSettingsInput,
-  R2HealthResponse,
-  SettingsInput,
-  SettingsResponse
-} from '$lib/api/types';
+import type { AIAssistantSettingsInput, AssistantHealthResponse, OverallConfigResponse, OverallConfigUpdateRequest, PresetExportPackage, PresetHealthResponse, PresetImportInstruction, PresetImportPreviewResponse, PromptOptimizerSystemPromptResponse, ProviderMappingPromptResponse, ProviderMappingValidateResponse, R2BackupSettingsInput, R2HealthResponse, SettingsInput, SettingsResponse } from '$lib/api/types/settings';
 import type { ToastVariant } from '$lib/stores/ui';
 
 type ShowToast = (message: string, variant?: ToastVariant) => void;
@@ -29,8 +17,6 @@ export type SettingsActivityState = {
   health: PresetHealthResponse | null;
   r2HealthChecking: boolean;
   r2Health: R2HealthResponse | null;
-  promptOptimizerHealthChecking: boolean;
-  promptOptimizerHealth: PromptOptimizerHealthResponse | null;
   aiAssistantHealthChecking: boolean;
   aiAssistantHealth: AssistantHealthResponse | null;
 };
@@ -45,8 +31,6 @@ const initialSettingsActivityState: SettingsActivityState = {
   health: null,
   r2HealthChecking: false,
   r2Health: null,
-  promptOptimizerHealthChecking: false,
-  promptOptimizerHealth: null,
   aiAssistantHealthChecking: false,
   aiAssistantHealth: null
 };
@@ -74,14 +58,6 @@ function createSettingsActivityStore() {
     update((state) => ({ ...state, r2Health }));
   }
 
-  function setPromptOptimizerHealthChecking(promptOptimizerHealthChecking: boolean) {
-    update((state) => ({ ...state, promptOptimizerHealthChecking }));
-  }
-
-  function setPromptOptimizerHealth(promptOptimizerHealth: PromptOptimizerHealthResponse | null) {
-    update((state) => ({ ...state, promptOptimizerHealth }));
-  }
-
   function setAiAssistantHealthChecking(aiAssistantHealthChecking: boolean) {
     update((state) => ({ ...state, aiAssistantHealthChecking }));
   }
@@ -92,10 +68,6 @@ function createSettingsActivityStore() {
 
   function clearHealth() {
     update((state) => ({ ...state, health: null }));
-  }
-
-  function clearPromptOptimizerHealth() {
-    update((state) => ({ ...state, promptOptimizerHealth: null }));
   }
 
   function clearAiAssistantHealth() {
@@ -113,12 +85,9 @@ function createSettingsActivityStore() {
     setHealth,
     setR2HealthChecking,
     setR2Health,
-    setPromptOptimizerHealthChecking,
-    setPromptOptimizerHealth,
     setAiAssistantHealthChecking,
     setAiAssistantHealth,
     clearHealth,
-    clearPromptOptimizerHealth,
     clearAiAssistantHealth,
     reset
   };
@@ -156,10 +125,7 @@ function createSettingsStore() {
         'saving settings'
       );
       update((state) => ({ ...state, settings }));
-      settingsActivityStore.clearHealth();
-      settingsActivityStore.setR2Health(null);
-      settingsActivityStore.clearPromptOptimizerHealth();
-      settingsActivityStore.clearAiAssistantHealth();
+      clearDerivedHealth();
       showToast(get(t).messages.presetSaved);
       return true;
     } finally {
@@ -167,22 +133,19 @@ function createSettingsStore() {
     }
   }
 
-  async function createPreset(showToast: ShowToast) {
+  async function createPreset(showToast: ShowToast, overrides: { api_url?: string; default_model?: string } = {}) {
     const activePresetId = get(settingsStore).settings?.active_preset_id;
     const settings = await apiFetch<SettingsResponse>(
       '/api/settings/presets',
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ source_preset_id: activePresetId })
+      body: JSON.stringify({ source_preset_id: activePresetId, ...overrides })
       },
       'creating preset'
     );
     update((state) => ({ ...state, settings }));
-    settingsActivityStore.clearHealth();
-    settingsActivityStore.setR2Health(null);
-    settingsActivityStore.clearPromptOptimizerHealth();
-    settingsActivityStore.clearAiAssistantHealth();
+    clearDerivedHealth();
     showToast(get(t).messages.presetCreated);
   }
 
@@ -195,10 +158,7 @@ function createSettingsStore() {
       'switching preset'
     );
     update((state) => ({ ...state, settings }));
-    settingsActivityStore.clearHealth();
-    settingsActivityStore.setR2Health(null);
-    settingsActivityStore.clearPromptOptimizerHealth();
-    settingsActivityStore.clearAiAssistantHealth();
+    clearDerivedHealth();
     showToast(get(t).messages.presetSwitched);
   }
 
@@ -222,10 +182,7 @@ function createSettingsStore() {
       'deleting preset'
     );
     update((state) => ({ ...state, settings }));
-    settingsActivityStore.clearHealth();
-    settingsActivityStore.setR2Health(null);
-    settingsActivityStore.clearPromptOptimizerHealth();
-    settingsActivityStore.clearAiAssistantHealth();
+    clearDerivedHealth();
     showToast(get(t).messages.presetDeleted);
   }
 
@@ -248,6 +205,96 @@ function createSettingsStore() {
     settingsActivityStore.clearHealth();
   }
 
+  function clearDerivedHealth() {
+    settingsActivityStore.clearHealth();
+    settingsActivityStore.setR2Health(null);
+    settingsActivityStore.clearAiAssistantHealth();
+  }
+
+  async function exportPreset(presetId: string) {
+    return apiFetch<PresetExportPackage>(
+      '/api/settings/presets/export',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ preset_id: presetId })
+      },
+      'exporting preset'
+    );
+  }
+
+  async function previewPresetImport(packageValue: unknown) {
+    return apiFetch<PresetImportPreviewResponse>(
+      '/api/settings/presets/import/preview',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ package: packageValue })
+      },
+      'previewing preset import'
+    );
+  }
+
+  async function importPresets(
+    packageValue: unknown,
+    items: PresetImportInstruction[],
+    showToast: ShowToast
+  ) {
+    const settings = await apiFetch<SettingsResponse>(
+      '/api/settings/presets/import',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ package: packageValue, items })
+      },
+      'importing presets'
+    );
+    update((state) => ({ ...state, settings }));
+    clearDerivedHealth();
+    showToast(get(t).messages.presetsImported(items.filter((item) => item.action !== 'skip').length));
+    return settings;
+  }
+
+  async function reorderPresets(presetIds: string[], showToast: ShowToast) {
+    const settings = await apiFetch<SettingsResponse>(
+      '/api/settings/presets/order',
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ preset_ids: presetIds })
+      },
+      'saving preset order'
+    );
+    update((state) => ({ ...state, settings }));
+    showToast(get(t).messages.presetOrderSaved);
+    return settings;
+  }
+
+  async function loadProviderMappingPrompt() {
+    return apiFetch<ProviderMappingPromptResponse>(
+      '/api/settings/provider-mapping/prompt',
+      {},
+      'loading provider mapping prompt'
+    );
+  }
+
+  async function validateProviderMapping(body: {
+    provider_config: unknown;
+    sample_submit?: unknown;
+    sample_poll?: unknown;
+    sample_result?: unknown;
+  }) {
+    return apiFetch<ProviderMappingValidateResponse>(
+      '/api/settings/provider-mapping/validate',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      },
+      'validating provider mapping'
+    );
+  }
+
   async function checkR2Health(body: R2BackupSettingsInput) {
     settingsActivityStore.setR2HealthChecking(true);
     try {
@@ -264,24 +311,6 @@ function createSettingsStore() {
     } finally {
       settingsActivityStore.setR2HealthChecking(false);
     }
-  }
-
-  async function checkPromptOptimizerHealth() {
-    settingsActivityStore.setPromptOptimizerHealthChecking(true);
-    try {
-      const promptOptimizerHealth = await apiFetch<PromptOptimizerHealthResponse>(
-        '/api/prompt/optimizer-health',
-        { method: 'POST' },
-        'checking prompt optimizer health'
-      );
-      settingsActivityStore.setPromptOptimizerHealth(promptOptimizerHealth);
-    } finally {
-      settingsActivityStore.setPromptOptimizerHealthChecking(false);
-    }
-  }
-
-  function clearPromptOptimizerHealth() {
-    settingsActivityStore.clearPromptOptimizerHealth();
   }
 
   async function checkAiAssistantHealth(body?: AIAssistantSettingsInput) {
@@ -363,9 +392,13 @@ function createSettingsStore() {
     deletePreset,
     checkPresetHealth,
     clearPresetHealth,
+    exportPreset,
+    previewPresetImport,
+    importPresets,
+    reorderPresets,
+    loadProviderMappingPrompt,
+    validateProviderMapping,
     checkR2Health,
-    checkPromptOptimizerHealth,
-    clearPromptOptimizerHealth,
     checkAiAssistantHealth,
     clearAiAssistantHealth,
     loadPromptOptimizerSystemPrompt,

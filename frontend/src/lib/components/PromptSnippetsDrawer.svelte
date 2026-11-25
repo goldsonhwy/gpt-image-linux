@@ -1,46 +1,65 @@
 <script lang="ts">
+  import Overlay from '$lib/components/Overlay.svelte';
   import { tick } from 'svelte';
-  import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput } from '$lib/api/types';
-  import { dialog } from '$lib/actions/dialog';
+  import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetUpdateInput } from '$lib/api/types/snippets';
+  import { promptForm } from '$lib/features/workspace/formState.svelte';
+  import { MAX_PROMPT_CHARS, promptLength } from '$lib/utils/imageModels';
   import { plainTextInput } from '$lib/actions/plainTextInput';
-  import { swipeClose } from '$lib/actions/swipeClose';
   import { t } from '$lib/i18n';
   import { confirmStore } from '$lib/stores/confirm';
 
   type MaybePromise = void | Promise<void>;
 
-  export let open = false;
-  export let snippets: PromptSnippet[] = [];
-  export let loading = false;
-  export let saving = false;
-  export let currentPrompt = '';
-  export let onClose: () => void = () => {};
-  export let onSearch: (query: string) => MaybePromise = () => {};
-  export let onCreate: (input: PromptSnippetCreateInput) => MaybePromise = () => {};
-  export let onUpdate: (snippetId: string, input: PromptSnippetUpdateInput) => MaybePromise = () => {};
-  export let onDelete: (snippet: PromptSnippet) => MaybePromise = () => {};
-  export let onUse: (snippet: PromptSnippet) => void = () => {};
-  export let onCopy: (snippet: PromptSnippet) => MaybePromise = () => {};
+  interface Props {
+    open?: boolean;
+    snippets?: PromptSnippet[];
+    loading?: boolean;
+    saving?: boolean;
+    onClose?: () => void;
+    onSearch?: (query: string) => MaybePromise;
+    onCreate?: (input: PromptSnippetCreateInput) => MaybePromise;
+    onUpdate?: (snippetId: string, input: PromptSnippetUpdateInput) => MaybePromise;
+    onDelete?: (snippet: PromptSnippet) => MaybePromise;
+    onUse?: (snippet: PromptSnippet) => void;
+    onCopy?: (snippet: PromptSnippet) => MaybePromise;
+  }
 
-  let query = '';
-  let title = '';
-  let promptText = '';
-  let favorite = false;
-  let editingId = '';
-  let initialTitle = '';
-  let initialPromptText = '';
-  let initialFavorite = false;
+  let {
+    open = false,
+    snippets = [],
+    loading = false,
+    saving = false,
+    onClose = () => {},
+    onSearch = () => {},
+    onCreate = () => {},
+    onUpdate = () => {},
+    onDelete = () => {},
+    onUse = () => {},
+    onCopy = () => {}
+  }: Props = $props();
+
+  let query = $state('');
+  let title = $state('');
+  let promptText = $state('');
+  let favorite = $state(false);
+  let editingId = $state('');
+  let initialTitle = $state('');
+  let initialPromptText = $state('');
+  let initialFavorite = $state(false);
+  let titleInput: HTMLInputElement | null = $state(null);
   let searchTimer: ReturnType<typeof setTimeout> | null = null;
-  let titleInput: HTMLInputElement | null = null;
 
-  $: isEditing = Boolean(editingId);
-  $: formReady = Boolean(title.trim() && promptText.trim()) && !saving;
-  $: hasCurrentPrompt = Boolean(currentPrompt.trim());
-  $: emptyLabel = query.trim() ? $t.promptSnippets.noMatch : $t.promptSnippets.noSnippets;
-  $: emptyHint = query.trim() ? $t.promptSnippets.noMatchHint : $t.promptSnippets.noSnippetsHint;
-  $: formDirty = editingId
-    ? title !== initialTitle || promptText !== initialPromptText || favorite !== initialFavorite
-    : Boolean(title.trim() || promptText.trim() || favorite);
+  const currentPrompt = $derived(promptForm.prompt);
+  const isEditing = $derived(Boolean(editingId));
+  const formReady = $derived(Boolean(title.trim() && promptText.trim()) && promptLength(promptText.trim()) <= MAX_PROMPT_CHARS && !saving);
+  const hasCurrentPrompt = $derived(Boolean(currentPrompt.trim()) && promptLength(currentPrompt.trim()) <= MAX_PROMPT_CHARS);
+  const emptyLabel = $derived(query.trim() ? $t.promptSnippets.noMatch : $t.promptSnippets.noSnippets);
+  const emptyHint = $derived(query.trim() ? $t.promptSnippets.noMatchHint : $t.promptSnippets.noSnippetsHint);
+  const formDirty = $derived(
+    editingId
+      ? title !== initialTitle || promptText !== initialPromptText || favorite !== initialFavorite
+      : Boolean(title.trim() || promptText.trim() || favorite)
+  );
 
   function resetForm() {
     editingId = '';
@@ -66,7 +85,7 @@
 
   async function saveCurrentPrompt() {
     const prompt = currentPrompt.trim();
-    if (!prompt || saving) return;
+    if (!prompt || promptLength(prompt) > MAX_PROMPT_CHARS || saving) return;
     await onCreate({
       title: snippetTitleFromPrompt(prompt),
       prompt,
@@ -125,32 +144,33 @@
     onUse(snippet);
   }
 
-  $: if (!open) {
-    if (searchTimer) clearTimeout(searchTimer);
-    query = '';
-    resetForm();
-  }
+  $effect(() => {
+    if (!open) {
+      if (searchTimer) clearTimeout(searchTimer);
+      query = '';
+      resetForm();
+    }
+  });
 </script>
 
-{#if open}
-  <div class="mobile-drawer-root fixed inset-0 z-50">
-    <button class="drawer-backdrop absolute inset-0" type="button" tabindex="-1" aria-label={$t.promptSnippets.closeLabel} on:click={closeDrawer}></button>
-    <aside
-      id="prompt-snippets-drawer"
-      class="mobile-drawer-panel fade-in absolute right-0 top-0 flex h-full w-full max-w-lg flex-col border-l border-zinc-800 bg-zinc-900 shadow-2xl"
-      aria-labelledby="prompt-snippets-drawer-title"
-      use:dialog={{ open, onClose: closeDrawer }}
-      use:swipeClose={{ enabled: open, onClose: closeDrawer }}
-    >
-      <div class="flex items-center justify-between border-b border-zinc-800 p-5">
+<Overlay
+  {open}
+  variant="drawer"
+  onClose={closeDrawer}
+  closeLabel={$t.promptSnippets.closeLabel}
+  labelledBy="prompt-snippets-drawer-title"
+  z={50}
+  panelId="prompt-snippets-drawer"
+>
+      <div class="flex items-center justify-between border-b border-stone-200 p-5 dark:border-zinc-800">
         <div class="min-w-0">
-          <h2 id="prompt-snippets-drawer-title" class="text-lg font-semibold text-zinc-100">{$t.promptSnippets.title}</h2>
-          <p class="mt-1 text-xs text-zinc-500">{$t.promptSnippets.subtitle}</p>
+          <h2 id="prompt-snippets-drawer-title" class="text-lg font-semibold text-stone-900 dark:text-zinc-100">{$t.promptSnippets.title}</h2>
+          <p class="mt-1 text-xs text-stone-500 dark:text-zinc-500">{$t.promptSnippets.subtitle}</p>
         </div>
-        <button type="button" class="mobile-touch-target control-focus rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100" aria-label={$t.promptSnippets.closeLabel} on:click={closeDrawer}>x</button>
+        <button type="button" class="mobile-touch-target control-focus rounded-lg p-1.5 text-stone-500 hover:bg-stone-100 hover:text-stone-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100" aria-label={$t.promptSnippets.closeLabel} onclick={closeDrawer}>x</button>
       </div>
 
-      <div class="space-y-4 border-b border-zinc-800 p-5">
+      <div class="space-y-4 border-b border-stone-200 p-5 dark:border-zinc-800">
         <div class="flex gap-2">
           <input
             bind:value={query}
@@ -158,52 +178,54 @@
             autocomplete="off"
             placeholder={$t.promptSnippets.search}
             aria-label={$t.promptSnippets.search}
-            class="control-focus min-w-0 flex-1 rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500"
-            on:input={scheduleSearch}
+            class="control-focus min-w-0 flex-1 rounded-lg border border-stone-300 bg-stone-50 px-3 py-2 text-sm text-stone-900 focus:border-emerald-500 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
+            oninput={scheduleSearch}
           />
           <button
             type="button"
             disabled={!hasCurrentPrompt || saving}
-            class="control-focus shrink-0 rounded-lg border border-emerald-500/40 px-3 py-2 text-xs font-semibold text-emerald-200 hover:bg-emerald-500/10 disabled:cursor-not-allowed disabled:border-zinc-700 disabled:text-zinc-500"
-            on:click={saveCurrentPrompt}
+            class="control-focus shrink-0 rounded-lg border border-emerald-500/40 px-3 py-2 text-xs font-semibold text-emerald-700 hover:bg-emerald-500/10 disabled:cursor-not-allowed disabled:border-stone-300 disabled:text-stone-400 dark:text-emerald-200 dark:disabled:border-zinc-700 dark:disabled:text-zinc-500"
+            onclick={saveCurrentPrompt}
           >
             {$t.promptSnippets.saveCurrent}
           </button>
         </div>
 
-        <section class="rounded-xl border border-zinc-800 bg-zinc-950/45 p-4" aria-labelledby="prompt-snippet-form-title">
+        <section class="rounded-xl border border-stone-200 bg-stone-50/80 p-4 dark:border-zinc-800 dark:bg-zinc-950/45" aria-labelledby="prompt-snippet-form-title">
           <div class="mb-3 flex items-center justify-between gap-3">
-            <h3 id="prompt-snippet-form-title" class="text-sm font-semibold text-zinc-200">{isEditing ? $t.promptSnippets.editTitle : $t.promptSnippets.newTitle}</h3>
+            <h3 id="prompt-snippet-form-title" class="text-sm font-semibold text-stone-800 dark:text-zinc-200">{isEditing ? $t.promptSnippets.editTitle : $t.promptSnippets.newTitle}</h3>
             {#if isEditing}
-              <button type="button" class="control-focus rounded text-xs font-medium text-zinc-400 hover:text-zinc-100" on:click={cancelEdit}>
+              <button type="button" class="control-focus rounded-sm text-xs font-medium text-stone-600 hover:text-stone-900 dark:text-zinc-400 dark:hover:text-zinc-100" onclick={cancelEdit}>
                 {$t.promptSnippets.cancelEdit}
               </button>
             {/if}
           </div>
           <label class="block">
-            <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.promptSnippets.titleLabel}</span>
+            <span class="mb-1.5 block text-xs font-medium text-stone-600 dark:text-zinc-400">{$t.promptSnippets.titleLabel}</span>
             <input
               bind:this={titleInput}
               bind:value={title}
               maxlength="160"
-              class="control-focus w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500"
+              class="control-focus w-full rounded-lg border border-stone-300 bg-white px-3 py-2 text-sm text-stone-900 focus:border-emerald-500 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
               placeholder={$t.promptSnippets.titlePlaceholder}
             />
           </label>
           <label class="mt-3 block">
-            <span class="mb-1.5 block text-xs font-medium text-zinc-400">{$t.promptSnippets.promptLabel}</span>
+            <span class="mb-1.5 block text-xs font-medium text-stone-600 dark:text-zinc-400">{$t.promptSnippets.promptLabel}</span>
             <textarea
               bind:value={promptText}
-              maxlength="4000"
+              aria-invalid={promptLength(promptText.trim()) > MAX_PROMPT_CHARS}
               rows="5"
-              class="control-focus w-full resize-y rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm leading-6 text-zinc-100 focus:border-emerald-500"
+              class="control-focus w-full resize-y rounded-lg border border-stone-300 bg-white px-3 py-2 text-sm leading-6 text-stone-900 focus:border-emerald-500 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
               spellcheck="false"
               placeholder={$t.promptSnippets.promptPlaceholder}
               use:plainTextInput
             ></textarea>
+            <span class="mt-1 block text-xs text-stone-500">{promptLength(promptText)}/{MAX_PROMPT_CHARS}</span>
+            {#if promptLength(promptText.trim()) > MAX_PROMPT_CHARS}<span role="alert" class="text-xs text-red-600">{$t.promptForm.promptTooLong}</span>{/if}
           </label>
           <div class="mt-3 flex items-center justify-between gap-3">
-            <label class="inline-flex items-center gap-2 text-xs font-medium text-zinc-300">
+            <label class="inline-flex items-center gap-2 text-xs font-medium text-stone-700 dark:text-zinc-300">
               <input bind:checked={favorite} type="checkbox" class="control-focus accent-emerald-500" />
               {$t.promptSnippets.favorite}
             </label>
@@ -211,7 +233,7 @@
               type="button"
               disabled={!formReady}
               class="control-focus rounded-lg bg-emerald-600 px-4 py-2 text-xs font-semibold text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
-              on:click={submitForm}
+              onclick={submitForm}
             >
               {saving ? $t.promptSnippets.saving : isEditing ? $t.promptSnippets.update : $t.promptSnippets.create}
             </button>
@@ -221,45 +243,45 @@
 
       <div class="mobile-drawer-scroll min-h-0 flex-1 overflow-y-auto p-5">
         {#if loading && snippets.length === 0}
-          <div class="rounded-xl border border-dashed border-zinc-800 bg-zinc-950/35 px-4 py-10 text-center">
-            <p class="text-sm font-medium text-zinc-300">{$t.promptSnippets.loading}</p>
+          <div class="rounded-xl border border-dashed border-stone-300 bg-stone-100/80 px-4 py-10 text-center dark:border-zinc-800 dark:bg-zinc-950/35">
+            <p class="text-sm font-medium text-stone-700 dark:text-zinc-300">{$t.promptSnippets.loading}</p>
           </div>
         {:else if snippets.length === 0}
-          <div class="rounded-xl border border-dashed border-zinc-800 bg-zinc-950/35 px-4 py-10 text-center">
-            <p class="text-sm font-medium text-zinc-300">{emptyLabel}</p>
-            <p class="mt-2 text-xs text-zinc-500">{emptyHint}</p>
+          <div class="rounded-xl border border-dashed border-stone-300 bg-stone-100/80 px-4 py-10 text-center dark:border-zinc-800 dark:bg-zinc-950/35">
+            <p class="text-sm font-medium text-stone-700 dark:text-zinc-300">{emptyLabel}</p>
+            <p class="mt-2 text-xs text-stone-500 dark:text-zinc-500">{emptyHint}</p>
           </div>
         {:else}
           <div class="space-y-3" aria-busy={loading}>
             {#each snippets as snippet (snippet.id)}
-              <article class="rounded-xl border border-zinc-800 bg-zinc-950/45 p-4">
+              <article class="rounded-xl border border-stone-200 bg-stone-50/80 p-4 dark:border-zinc-800 dark:bg-zinc-950/45">
                 <div class="flex items-start justify-between gap-3">
                   <div class="min-w-0">
-                    <h3 class="truncate text-sm font-semibold text-zinc-100">{snippet.title}</h3>
-                    <p class="mt-2 line-clamp-3 whitespace-pre-wrap text-sm leading-6 text-zinc-300">{snippet.prompt}</p>
+                    <h3 class="truncate text-sm font-semibold text-stone-900 dark:text-zinc-100">{snippet.title}</h3>
+                    <p class="mt-2 line-clamp-3 whitespace-pre-wrap text-sm leading-6 text-stone-700 dark:text-zinc-300">{snippet.prompt}</p>
                   </div>
                   <button
                     type="button"
-                    class="control-focus shrink-0 rounded-lg px-2 py-1 text-base leading-none text-amber-300 hover:bg-zinc-800 disabled:opacity-50"
+                    class="control-focus shrink-0 rounded-lg px-2 py-1 text-base leading-none text-amber-600 hover:bg-stone-100 disabled:opacity-50 dark:text-amber-300 dark:hover:bg-zinc-800"
                     aria-label={snippet.favorite ? $t.common.unfavorite : $t.common.favorite}
                     title={snippet.favorite ? $t.common.unfavorite : $t.common.favorite}
                     disabled={saving}
-                    on:click={() => onUpdate(snippet.id, { favorite: !snippet.favorite })}
+                    onclick={() => onUpdate(snippet.id, { favorite: !snippet.favorite })}
                   >
                     {snippet.favorite ? '★' : '☆'}
                   </button>
                 </div>
                 <div class="mt-4 flex flex-wrap justify-end gap-2">
-                  <button type="button" class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800" on:click={() => onCopy(snippet)}>
+                  <button type="button" class="control-focus rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 hover:bg-stone-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" onclick={() => onCopy(snippet)}>
                     {$t.promptSnippets.copy}
                   </button>
-                  <button type="button" class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800" on:click={() => editSnippet(snippet)}>
+                  <button type="button" class="control-focus rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 hover:bg-stone-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" onclick={() => editSnippet(snippet)}>
                     {$t.promptSnippets.edit}
                   </button>
-                  <button type="button" class="control-focus rounded-lg border border-red-500/40 px-3 py-2 text-xs text-red-300 hover:bg-red-500/10" on:click={() => onDelete(snippet)}>
+                  <button type="button" class="control-focus rounded-lg border border-red-500/40 px-3 py-2 text-xs text-red-700 hover:bg-red-500/10 dark:text-red-300" onclick={() => onDelete(snippet)}>
                     {$t.common.delete}
                   </button>
-                  <button type="button" class="control-focus rounded-lg border border-emerald-500/40 px-3 py-2 text-xs font-medium text-emerald-200 hover:bg-emerald-500/10" on:click={() => useSnippet(snippet)}>
+                  <button type="button" class="control-focus rounded-lg border border-emerald-500/40 px-3 py-2 text-xs font-medium text-emerald-700 hover:bg-emerald-500/10 dark:text-emerald-200" onclick={() => useSnippet(snippet)}>
                     {$t.promptSnippets.use}
                   </button>
                 </div>
@@ -268,6 +290,4 @@
           </div>
         {/if}
       </div>
-    </aside>
-  </div>
-{/if}
+</Overlay>

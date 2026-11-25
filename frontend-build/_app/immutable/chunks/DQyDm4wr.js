@@ -1,0 +1,1 @@
+import{s as e}from"./CGEWKYnn.js";import"./BXZjRUTB.js";var t={request:null};function n(){let{subscribe:n,set:r}=e(t),i=1,a=null;function o(e){let n=a;a=null,r(t),n?.(e)}function s(e){a&&o(!1);let t={...e,id:i,variant:e.variant||`default`};return i+=1,r({request:t}),new Promise(e=>{a=e})}return{subscribe:n,confirm:s,accept:()=>o(!0),cancel:()=>o(!1)}}var r=n();export{r as t};

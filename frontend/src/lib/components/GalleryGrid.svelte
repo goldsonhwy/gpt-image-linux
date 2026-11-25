@@ -1,100 +1,364 @@
 <script lang="ts">
-  import { onDestroy } from 'svelte';
-  import type { GalleryEntry, GalleryResponse } from '$lib/api/types';
+  import { onDestroy, onMount } from 'svelte';
+  import type { GalleryEntry, GalleryResponse } from '$lib/api/types/gallery';
+  import CollectionsDialog from '$lib/components/gallery/CollectionsDialog.svelte';
+  import CollectionsOverview from '$lib/components/gallery/CollectionsOverview.svelte';
+  import GalleryFilterToolbar from '$lib/components/gallery/GalleryFilterToolbar.svelte';
+  import GalleryPagination from '$lib/components/gallery/GalleryPagination.svelte';
   import { t } from '$lib/i18n';
-  import type { GalleryFilters, GalleryOperationStatus } from '$lib/stores/gallery';
-  import { displayImageSize, formatBytes, imageUrl, thumbnailUrl } from '$lib/utils/format';
+  import { galleryActivityStore, galleryStore, type GalleryFilters } from '$lib/stores/gallery';
+  import { defaultCollection, galleryCollectionsStore } from '$lib/stores/galleryCollections';
+  import { uiStore } from '$lib/stores/ui';
+  import {
+    bandPastThreshold,
+    bandRect,
+    idsForBand,
+    swipeSelectBegin,
+    swipeSelectMove,
+    type BandRect,
+    type Point,
+    type SwipeSelectState
+  } from '$lib/features/gallery/selectionGestures';
+  import BookmarkPlus from 'lucide-svelte/icons/bookmark-plus';
+  import CloudUpload from 'lucide-svelte/icons/cloud-upload';
+  import Download from 'lucide-svelte/icons/download';
+  import FileText from 'lucide-svelte/icons/file-text';
+  import Pencil from 'lucide-svelte/icons/pencil';
+  import SlidersHorizontal from 'lucide-svelte/icons/sliders-horizontal';
+  import Star from 'lucide-svelte/icons/star';
+  import Trash2 from 'lucide-svelte/icons/trash-2';
+  import X from 'lucide-svelte/icons/x';
+  import { displayImageSize, formatBytes, gifInteractiveSrc, isGifMedia, isSvgMedia } from '$lib/utils/format';
 
-  export let gallery: GalleryResponse | null = null;
-  export let filters: GalleryFilters;
-  export let loading = false;
-  export let operationStatus: GalleryOperationStatus | null = null;
-  export let canSyncR2 = false;
-  export let onFilter: (key: keyof GalleryFilters, value: string | boolean) => void = () => {};
-  export let onResetFilters: () => void = () => {};
-  export let onPage: (page: number, direction?: 'next' | 'prev' | 'jump') => void = () => {};
-  export let onLoadStats: () => void = () => {};
-  export let onFavorite: (image: GalleryEntry) => void = () => {};
-  export let onDelete: (image: GalleryEntry) => void = () => {};
-  export let onDeleteAll: () => void = () => {};
-  export let onImport: (file: File) => void = () => {};
-  export let onExport: () => void = () => {};
-  export let onSync: () => void = () => {};
-  export let onOpen: (image: GalleryEntry) => void = () => {};
-  export let onEdit: (image: GalleryEntry) => void = () => {};
-  export let onUsePrompt: (image: GalleryEntry) => void = () => {};
-  export let onUseAll: (image: GalleryEntry) => void = () => {};
-  export let selectionMode = false;
-  export let selectedIds: Set<string> = new Set();
-  export let selectionTokenCount = 0;
-  export let onSelectionMode: (enabled: boolean) => void = () => {};
-  export let onToggleSelection: (image: GalleryEntry) => void = () => {};
-  export let onSelectPage: () => void = () => {};
-  export let onSelectFiltered: () => void = () => {};
-  export let onClearSelection: () => void = () => {};
-  export let onBatchDelete: () => void = () => {};
-  export let onBatchFavorite: (favorite: boolean) => void = () => {};
-  export let onBatchDownload: () => void = () => {};
-  export let canAiAnalyze = false;
-  export let onBatchAiAnalyze: () => void = () => {};
+  interface Props {
+    canSyncR2?: boolean;
+    canNodeImageUpload?: boolean;
+    canAiAnalyze?: boolean;
+    onFilter?: (key: keyof GalleryFilters, value: string | boolean) => void;
+    onResetFilters?: () => void;
+    onPage?: (page: number, direction?: 'next' | 'prev' | 'jump') => void;
+    onLoadMore?: () => void;
+    onLoadStats?: () => void;
+    onFavorite?: (image: GalleryEntry) => void;
+    onDelete?: (image: GalleryEntry) => void;
+    onDeleteAll?: () => void;
+    onImport?: (file: File) => void;
+    onExport?: () => void;
+    onSync?: () => void;
+    onOpen?: (image: GalleryEntry) => void;
+    onEdit?: (image: GalleryEntry) => void;
+    onUsePrompt?: (image: GalleryEntry) => void;
+    onUseAll?: (image: GalleryEntry) => void;
+    onNodeImageUpload?: (image: GalleryEntry) => void;
+    onBatchFavorite?: (favorite: boolean) => void;
+    onBatchDelete?: () => void;
+    onBatchNodeImageUpload?: () => void;
+    onBatchAiAnalyze?: () => void;
+  }
 
-  const skeletonCards = Array.from({ length: 6 });
+  let {
+    canSyncR2 = false,
+    canNodeImageUpload = false,
+    canAiAnalyze = false,
+    onFilter = () => {},
+    onResetFilters = () => {},
+    onPage = () => {},
+    onLoadMore = () => {},
+    onLoadStats = () => {},
+    onFavorite = () => {},
+    onDelete = () => {},
+    onDeleteAll = () => {},
+    onImport = () => {},
+    onExport = () => {},
+    onSync = () => {},
+    onOpen = () => {},
+    onEdit = () => {},
+    onUsePrompt = () => {},
+    onUseAll = () => {},
+    onNodeImageUpload = () => {},
+    onBatchFavorite = () => {},
+    onBatchDelete = () => {},
+    onBatchNodeImageUpload = () => {},
+    onBatchAiAnalyze = () => {}
+  }: Props = $props();
+
+  const skeletonCards = Array.from({ length: 48 });
+  // The first row is visible on load, so it is fetched eagerly; only the very
+  // first thumbnail is marked high priority. Everything after the first row is
+  // lazy with the browser's default priority.
   const EAGER_THUMB_COUNT = 3;
-  const THUMBNAIL_RETRY_DELAYS_MS = [1200, 2400, 4800, 9600, 16000];
-  const THUMBNAIL_PLACEHOLDER_SRC =
-    'data:image/svg+xml;charset=UTF-8,' +
-    encodeURIComponent(
-      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-hidden="true">
-        <rect width="64" height="64" fill="#e7e5e4"/>
-        <path d="M0 0h64v64H0z" fill="none" stroke="#d6d3d1"/>
-        <path d="M10 42l11-12 9 9 13-15 11 18" fill="none" stroke="#a8a29e" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-        <circle cx="22" cy="22" r="5" fill="#c7c3be"/>
-      </svg>`
-    );
+  const THUMBNAIL_PLACEHOLDER_SRC = 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
 
-  let importInput: HTMLInputElement;
-  let pageInput = '1';
-  let failedThumbnailIds = new Set<string>();
-  const thumbnailRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  const thumbnailRetryCounts = new Map<string, number>();
+  function thumbnailLoading(index: number): 'eager' | 'lazy' {
+    return index < EAGER_THUMB_COUNT ? 'eager' : 'lazy';
+  }
 
-  $: images = gallery?.images || [];
-  $: currentPage = gallery?.page || 1;
-  $: totalPages = Math.max(gallery?.total_pages || 1, 1);
-  $: pageInput = String(currentPage);
-  $: initialLoading = loading && images.length === 0;
-  $: busy = loading || Boolean(operationStatus);
-  $: selectedAllFiltered = selectionTokenCount > 0;
-  $: selectedCount = selectedAllFiltered ? selectionTokenCount : selectedIds.size;
-  $: pageSelectedCount = selectedAllFiltered ? images.length : images.filter((image) => selectedIds.has(image.id)).length;
-  $: hasSelection = selectedCount > 0;
-  $: selectionSummary = selectedAllFiltered
-    ? $t.gallery.filteredSelection(selectedCount)
-    : selectedCount > pageSelectedCount
-      ? $t.gallery.crossPageSelection(pageSelectedCount, selectedCount)
-      : $t.gallery.pageSelection(selectedCount);
-  $: hasFilters = Boolean(
-    filters.prompt.trim() ||
-      filters.model ||
-      filters.preset ||
-      filters.size ||
-      filters.dateFrom ||
-      filters.dateTo ||
-      filters.favorite
+  function thumbnailFetchPriority(index: number): 'high' | 'auto' {
+    return index === 0 ? 'high' : 'auto';
+  }
+
+  let importInput: HTMLInputElement | null = $state(null);
+  let failedThumbnailUrls = $state(new Map<string, string>());
+  let poppedFavoriteId = $state('');
+  let favoritePopTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const gallery = $derived($galleryStore.gallery);
+  const filters = $derived($galleryStore.filters);
+  const loading = $derived($galleryStore.loading);
+  const operationStatus = $derived($galleryActivityStore.operationStatus);
+  const selectionMode = $derived($galleryStore.selectionMode);
+  const selectedIds = $derived($galleryStore.selectedIds);
+  const selectionTokenCount = $derived($galleryStore.selectionToken?.count || 0);
+
+  // One beat, on the way in only: turning a favourite off is not a celebration.
+  function popFavorite(image: GalleryEntry) {
+    if (image.favorite) return;
+    clearTimeout(favoritePopTimer);
+    clearTimeout(suppressClickTimer);
+    poppedFavoriteId = '';
+    requestAnimationFrame(() => {
+      poppedFavoriteId = image.id;
+    });
+    favoritePopTimer = setTimeout(() => {
+      poppedFavoriteId = '';
+    }, 280);
+  }
+
+  onDestroy(() => {
+    clearTimeout(favoritePopTimer);
+    handleBandCancel();
+    swipeState = null;
+  });
+
+  let collectionsDialogOpen = $state(false);
+  let collectionsOverviewOpen = $state(false);
+  const collections = $derived($galleryCollectionsStore.collections);
+  const defaultTarget = $derived(defaultCollection(collections));
+  const activeCollection = $derived(collections.find((collection) => collection.id === filters.collectionId) || null);
+
+  onMount(() => {
+    void galleryCollectionsStore.load().catch(() => {});
+  });
+
+  function showCollectionError(error: unknown) {
+    uiStore.showToast(error instanceof Error ? error.message : $t.messages.requestFailed, 'error');
+  }
+
+  async function addSelectionToCollection(collectionId: string) {
+    const collection = collections.find((item) => item.id === collectionId);
+    if (!collection || !hasSelection) return;
+    try {
+      const result = await galleryCollectionsStore.addItems(collectionId, galleryStore.selectedBatchRequestBody());
+      uiStore.showToast($t.collections.added(result.changed_count, collection.name));
+    } catch (error) {
+      showCollectionError(error);
+    }
+  }
+
+  async function removeSelectionFromCollection() {
+    if (!activeCollection || !hasSelection) return;
+    try {
+      const result = await galleryCollectionsStore.removeItems(activeCollection.id, galleryStore.selectedBatchRequestBody());
+      galleryStore.clearSelection();
+      uiStore.showToast($t.collections.removed(result.changed_count, activeCollection.name));
+    } catch (error) {
+      showCollectionError(error);
+    }
+  }
+
+  async function addToDefaultCollection(image: GalleryEntry) {
+    if (!defaultTarget) return;
+    try {
+      const result = await galleryCollectionsStore.addItems(defaultTarget.id, { ids: [image.id] });
+      uiStore.showToast(
+        result.changed_count ? $t.collections.added(1, defaultTarget.name) : $t.collections.alreadyIn(defaultTarget.name)
+      );
+    } catch (error) {
+      showCollectionError(error);
+    }
+  }
+
+  const images = $derived(gallery?.images || []);
+  $effect(() => {
+    pruneFailedThumbnailUrls(images);
+  });
+  const initialLoading = $derived(loading && images.length === 0);
+  const busy = $derived(loading || Boolean(operationStatus));
+  const selectedAllFiltered = $derived(selectionTokenCount > 0);
+  const selectedCount = $derived(selectedAllFiltered ? selectionTokenCount : selectedIds.size);
+  const pageSelectedCount = $derived.by(() => {
+    if (selectedAllFiltered) return images.length;
+    let count = 0;
+    for (const image of images) {
+      if (selectedIds.has(image.id)) count += 1;
+    }
+    return count;
+  });
+  const hasSelection = $derived(selectedCount > 0);
+  const selectionSummary = $derived(
+    selectedAllFiltered
+      ? $t.gallery.filteredSelection(selectedCount)
+      : selectedCount > pageSelectedCount
+        ? $t.gallery.crossPageSelection(pageSelectedCount, selectedCount)
+        : $t.gallery.pageSelection(selectedCount)
+  );
+  const hasFilters = $derived(
+    Boolean(
+      filters.prompt.trim() ||
+        filters.model ||
+        filters.preset ||
+        filters.size ||
+        filters.dateFrom ||
+        filters.dateTo ||
+        filters.favorite ||
+        filters.maskOnly ||
+        filters.collectionId
+    )
   );
 
   function importSelected() {
-    const file = importInput.files?.[0];
+    const file = importInput?.files?.[0];
     if (file) onImport(file);
-    importInput.value = '';
+    if (importInput) importInput.value = '';
   }
 
-  function handleImageClick(image: GalleryEntry) {
+  function handleImageClick(event: MouseEvent, image: GalleryEntry) {
+    // Ctrl/⌘ (or shift) click multi-selects without switching modes first.
+    if (gesturesEnabled && (event.ctrlKey || event.metaKey || event.shiftKey)) {
+      galleryStore.toggleSelection(image);
+      return;
+    }
     if (selectionMode) {
-      onToggleSelection(image);
+      galleryStore.toggleSelection(image);
       return;
     }
     onOpen(image);
+  }
+
+  // ── Selection gestures: desktop drag band, ctrl/⌘ multi-select, touch swipe ──
+  const finePointer =
+    typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+      ? window.matchMedia('(hover: hover) and (pointer: fine)').matches
+      : false;
+
+  // Explicit set operations are off-limits while a filtered-selection token is
+  // active: toggling one card would silently materialise the whole filtered
+  // set into page ids, so the band, swipe and ctrl-click paths all opt out.
+  const gesturesEnabled = $derived(!selectedAllFiltered);
+
+  let gridElement: HTMLElement | null = $state(null);
+  let bandStart: Point | null = null;
+  let bandAdditive = false;
+  let bandRectState = $state<BandRect | null>(null);
+  let suppressNextClick = false;
+  let suppressClickTimer: ReturnType<typeof setTimeout> | undefined;
+  let swipeState: SwipeSelectState | null = null;
+
+  function handleBandMove(event: PointerEvent) {
+    if (!bandStart || !gridElement) return;
+    const current = { x: event.clientX, y: event.clientY };
+    if (!bandPastThreshold(bandStart, current)) return;
+    event.preventDefault();
+    const containerRect = gridElement.getBoundingClientRect();
+    const rect = bandRect(
+      { x: bandStart.x - containerRect.left, y: bandStart.y - containerRect.top },
+      { x: current.x - containerRect.left, y: current.y - containerRect.top }
+    );
+    bandRectState = rect;
+  }
+
+  function handleBandPointerUp(event: PointerEvent) {
+    window.removeEventListener('pointermove', handleBandMove);
+    window.removeEventListener('pointercancel', handleBandCancel);
+    const start = bandStart;
+    bandStart = null;
+    if (!start || !gridElement) return;
+    const current = { x: event.clientX, y: event.clientY };
+    const rect = bandRectState;
+    bandRectState = null;
+    if (!rect || !bandPastThreshold(start, current)) return;
+    // The pointerup lands as a click on whichever card is under it; swallow
+    // that click so ending a band never opens the preview underneath.
+    suppressGestureClick();
+    if (!gesturesEnabled) return;
+    const containerRect = gridElement.getBoundingClientRect();
+    const band = {
+      left: rect.left,
+      top: rect.top,
+      width: rect.width,
+      height: rect.height
+    };
+    const cards = Array.from(gridElement.querySelectorAll<HTMLElement>('.gallery-card'))
+      .map((card) => {
+        const cardRect = card.getBoundingClientRect();
+        return {
+          id: card.dataset.imageId || '',
+          rect: {
+            left: cardRect.left - containerRect.left,
+            top: cardRect.top - containerRect.top,
+            width: cardRect.width,
+            height: cardRect.height
+          }
+        };
+      })
+      .filter((card) => card.id && card.rect.top + containerRect.top < window.innerHeight && card.rect.top + containerRect.top + card.rect.height > 0);
+    galleryStore.applyBandSelection(idsForBand(band, cards), bandAdditive);
+  }
+
+  function handleBandCancel() {
+    window.removeEventListener('pointermove', handleBandMove);
+    window.removeEventListener('pointercancel', handleBandCancel);
+    window.removeEventListener('pointerup', handleBandPointerUp);
+    bandStart = null;
+    bandRectState = null;
+  }
+
+  function suppressGestureClick() {
+    suppressNextClick = true;
+    clearTimeout(suppressClickTimer);
+    suppressClickTimer = setTimeout(() => { suppressNextClick = false; }, 500);
+  }
+
+  function handleGridPointerDown(event: PointerEvent) {
+    if (!gesturesEnabled) return;
+    if (event.pointerType !== 'mouse' || event.button !== 0 || !finePointer) return;
+    const target = event.target as HTMLElement | null;
+    if (!target || !gridElement) return;
+    if (target.closest('a, select, input, textarea, label')) return;
+    if (target.closest('button') && !target.closest('.gallery-media-well')) return;
+    bandStart = { x: event.clientX, y: event.clientY };
+    bandAdditive = event.ctrlKey || event.metaKey || event.shiftKey;
+    window.addEventListener('pointermove', handleBandMove);
+    window.addEventListener('pointercancel', handleBandCancel);
+    window.addEventListener('pointerup', handleBandPointerUp, { once: true });
+  }
+
+  function handleGridClickCapture(event: MouseEvent) {
+    if (!suppressNextClick) return;
+    suppressNextClick = false;
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  function handleCardSwipeDown(event: PointerEvent) {
+    if (!gesturesEnabled) return;
+    if (event.pointerType !== 'touch' || !event.isPrimary || event.clientX < 24 || event.clientX > window.innerWidth - 24) return;
+    swipeState = swipeSelectBegin(event.pointerId, event.clientX, event.clientY);
+  }
+
+  function handleCardSwipeMove(event: PointerEvent, image: GalleryEntry) {
+    if (!swipeState || event.pointerId !== swipeState.pointerId) return;
+    if (!gesturesEnabled) { swipeState = null; return; }
+    if (swipeSelectMove(swipeState, event.clientX, event.clientY) === 'committed') {
+      // Committing the swipe also lands as a click on the card; suppress it so
+      // selecting never opens the lightbox.
+      suppressGestureClick();
+      galleryStore.toggleSelection(image);
+    }
+  }
+
+  function handleCardSwipeEnd(event: PointerEvent) {
+    if (swipeState && event.pointerId === swipeState.pointerId) swipeState = null;
   }
 
   function handleGalleryAction(event: MouseEvent, action: () => void) {
@@ -103,116 +367,61 @@
     action();
   }
 
-  function clampPage(page: number) {
-    return Math.min(Math.max(page, 1), totalPages);
-  }
+  let hoveredGifId = $state<string | null>(null);
+  let focusedGifId = $state<string | null>(null);
 
-  function commitPageInput() {
-    const value = pageInput.trim();
-    const requestedPage = /^\d+$/.test(value) ? Number.parseInt(value, 10) : Number.NaN;
-    if (!Number.isFinite(requestedPage)) {
-      pageInput = String(currentPage);
-      return;
-    }
-
-    const nextPage = clampPage(requestedPage);
-    pageInput = String(nextPage);
-    if (nextPage !== currentPage) onPage(nextPage);
-  }
-
-  function handlePageInputKeydown(event: KeyboardEvent) {
-    if (event.key !== 'Enter') return;
-    event.preventDefault();
-    commitPageInput();
-  }
-
-  function handlePageInputBlur() {
-    commitPageInput();
-  }
-
-  function handleSearchInput(event: Event) {
-    const value = (event.currentTarget as HTMLInputElement).value;
-    onFilter('prompt', value);
+  function galleryMediaUrl(image: GalleryEntry) {
+    return gifInteractiveSrc(image, hoveredGifId === image.id || focusedGifId === image.id);
   }
 
   function galleryImageSrc(image: GalleryEntry) {
-    if (!thumbnailReady(image)) {
-      return image.thumbnail_status === 'queued'
-        ? imageUrl(image.filename, image.image_url)
-        : THUMBNAIL_PLACEHOLDER_SRC;
-    }
-    if (failedThumbnailIds.has(image.id)) {
-      return THUMBNAIL_PLACEHOLDER_SRC;
-    }
-    const retryAttempt = thumbnailRetryCounts.get(image.id) || 0;
-    return retryAttempt > 0 ? thumbnailRequestUrl(image, retryAttempt) : thumbnailUrl(image.filename, image.thumbnail_url);
+    if (!thumbnailReady(image)) return THUMBNAIL_PLACEHOLDER_SRC;
+    const src = galleryMediaUrl(image);
+    return failedThumbnailUrls.get(image.id) === src ? THUMBNAIL_PLACEHOLDER_SRC : src;
+  }
+
+  function pruneFailedThumbnailUrls(visibleImages: GalleryEntry[]) {
+    // Nothing to prune (and no need to build a Set over the page) until a
+    // thumbnail has actually failed.
+    if (failedThumbnailUrls.size === 0) return;
+    const visibleIds = new Set(visibleImages.map((image) => image.id));
+    if ([...failedThumbnailUrls.keys()].every((imageId) => visibleIds.has(imageId))) return;
+    failedThumbnailUrls = new Map(
+      [...failedThumbnailUrls].filter(([imageId]) => visibleIds.has(imageId))
+    );
   }
 
   function thumbnailReady(image: GalleryEntry) {
     return !image.thumbnail_status || image.thumbnail_status === 'ready';
   }
 
-  function thumbnailRequestUrl(image: GalleryEntry, attempt: number) {
-    const base = thumbnailUrl(image.filename, image.thumbnail_url);
-    if (!attempt) return base;
-    try {
-      const url = new URL(base, window.location.origin);
-      url.searchParams.set('retry', String(attempt));
-      return url.origin === window.location.origin ? `${url.pathname}${url.search}${url.hash}` : url.toString();
-    } catch {
-      return base;
-    }
-  }
-
-  function clearThumbnailRetry(imageId: string) {
-    const timer = thumbnailRetryTimers.get(imageId);
-    if (timer) clearTimeout(timer);
-    thumbnailRetryTimers.delete(imageId);
-    thumbnailRetryCounts.delete(imageId);
-    failedThumbnailIds = new Set([...failedThumbnailIds].filter((id) => id !== imageId));
-  }
-
-  function scheduleThumbnailRetry(image: GalleryEntry) {
-    const attempt = thumbnailRetryCounts.get(image.id) || 0;
-    if (attempt >= THUMBNAIL_RETRY_DELAYS_MS.length) return;
-    if (thumbnailRetryTimers.has(image.id)) return;
-
-    failedThumbnailIds = new Set(failedThumbnailIds).add(image.id);
-    const delay = THUMBNAIL_RETRY_DELAYS_MS[attempt];
-    const timer = setTimeout(() => {
-      thumbnailRetryTimers.delete(image.id);
-      failedThumbnailIds = new Set([...failedThumbnailIds].filter((id) => id !== image.id));
-      thumbnailRetryCounts.set(image.id, attempt + 1);
-    }, delay);
-    thumbnailRetryTimers.set(image.id, timer);
-  }
-
   function handleThumbnailLoad(image: GalleryEntry) {
     if (!thumbnailReady(image)) return;
-    clearThumbnailRetry(image.id);
+    if (!failedThumbnailUrls.has(image.id)) return;
+    failedThumbnailUrls = new Map(failedThumbnailUrls);
+    failedThumbnailUrls.delete(image.id);
   }
 
-  function handleThumbnailError(event: Event, image: GalleryEntry) {
-    if (!thumbnailReady(image)) {
-      failedThumbnailIds = new Set(failedThumbnailIds).add(image.id);
-      return;
-    }
-    scheduleThumbnailRetry(image);
+  function handleThumbnailError(image: GalleryEntry) {
+    if (!thumbnailReady(image)) return;
+    failedThumbnailUrls = new Map(failedThumbnailUrls).set(image.id, galleryMediaUrl(image));
   }
 
   function isImageSelected(image: GalleryEntry) {
     return selectedAllFiltered || selectedIds.has(image.id);
   }
 
-  onDestroy(() => {
-    thumbnailRetryTimers.forEach((timer) => clearTimeout(timer));
-    thumbnailRetryTimers.clear();
-    thumbnailRetryCounts.clear();
-    failedThumbnailIds = new Set();
+  const selectedAllVisibleSvg = $derived.by(() => {
+    if (selectedAllFiltered || selectedIds.size === 0 || !images.length) return false;
+    const selectedVisible = images.filter((image) => selectedIds.has(image.id));
+    return (
+      selectedVisible.length === selectedIds.size &&
+      selectedVisible.every((image) => isSvgMedia(image))
+    );
   });
 </script>
 
-<section class="rounded-2xl border border-stone-200 bg-white/80 p-4 shadow-sm shadow-stone-200/60 sm:p-5 dark:border-zinc-800 dark:bg-zinc-900/60 dark:shadow-none">
+<section class="app-section flex min-h-full flex-col px-1 py-1 sm:px-0">
   <div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
     <div>
       <h2 class="text-sm font-semibold text-stone-950 dark:text-zinc-100">{$t.gallery.title}</h2>
@@ -221,20 +430,28 @@
         {#if gallery?.total_bytes}
           <span class="ml-2">{formatBytes(gallery.total_bytes)}</span>
         {:else if gallery?.total}
-          <button type="button" class="control-focus ml-2 rounded text-xs font-medium text-stone-600 hover:text-stone-900 dark:text-zinc-400 dark:hover:text-zinc-200" on:click={onLoadStats}>
+          <button type="button" class="control-focus ml-2 rounded-sm text-xs font-medium text-stone-600 hover:text-stone-900 dark:text-zinc-400 dark:hover:text-zinc-200" onclick={onLoadStats}>
             {$t.gallery.showSize}
           </button>
         {/if}
       </p>
     </div>
     <div class="flex flex-wrap gap-2">
-      <button type="button" class="control-focus rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 hover:bg-stone-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" on:click={() => onSelectionMode(!selectionMode)}>
+        <button
+          type="button"
+          class={`control-focus rounded-lg border px-3 py-2 text-xs font-medium ${collectionsOverviewOpen ? 'border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-500' : 'border-emerald-500 bg-emerald-500 text-white hover:bg-emerald-600'}`}
+          aria-pressed={collectionsOverviewOpen}
+          onclick={() => (collectionsOverviewOpen = !collectionsOverviewOpen)}
+        >
+          {collectionsOverviewOpen ? $t.collections.hideOverview : $t.collections.showOverview}
+        </button>
+      <button type="button" class="control-focus rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 hover:bg-stone-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" onclick={() => galleryStore.setSelectionMode(!selectionMode)}>
         {selectionMode ? $t.gallery.cancelSelection : $t.gallery.select}
       </button>
-      <button type="button" class="control-focus rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" disabled={busy} on:click={() => importInput.click()}>
+      <button type="button" class="control-focus rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" disabled={busy} onclick={() => importInput?.click()}>
         {operationStatus?.kind === 'import' ? $t.gallery.importing : $t.gallery.import}
       </button>
-      <button type="button" class="control-focus rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" disabled={busy} on:click={onExport}>
+      <button type="button" class="control-focus rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" disabled={busy} onclick={onExport}>
         {operationStatus?.kind === 'export' ? $t.gallery.exporting : $t.gallery.exportZip}
       </button>
       <button
@@ -242,141 +459,122 @@
         class="control-focus rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
         disabled={busy || !canSyncR2}
         title={canSyncR2 ? $t.gallery.syncR2 : $t.messages.r2BackupUnavailable}
-        on:click={onSync}
+        onclick={onSync}
       >
         {operationStatus?.kind === 'sync' ? $t.gallery.syncing : $t.gallery.syncR2}
       </button>
-      <button type="button" class="control-focus rounded-lg border border-red-500/40 px-3 py-2 text-xs text-red-300 hover:bg-red-500/10" on:click={onDeleteAll}>
+      <button type="button" class="control-focus rounded-lg border border-red-500/40 px-3 py-2 text-xs text-red-700 hover:bg-red-500/10 dark:text-red-300" onclick={onDeleteAll}>
         {$t.gallery.deleteAll}
       </button>
-      <input bind:this={importInput} type="file" accept=".zip,application/zip" class="hidden" on:change={importSelected} />
+      <input bind:this={importInput} type="file" accept=".zip,application/zip" class="hidden" onchange={importSelected} />
     </div>
   </div>
 
-  <div class="mb-4 rounded-xl border border-stone-200 bg-stone-50/75 p-2.5 dark:border-zinc-800 dark:bg-zinc-950/35">
-    <div class="mb-2 flex items-center justify-between gap-3 px-1">
-      <div class="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-stone-500 dark:text-zinc-400">
-        <span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>
-        {$t.gallery.filters}
-      </div>
-      {#if hasFilters}
-        <button type="button" class="control-focus rounded-md px-2 py-1 text-xs font-medium text-emerald-700 hover:bg-emerald-500/10 hover:text-emerald-800 dark:text-emerald-300 dark:hover:text-emerald-200" on:click={onResetFilters}>{$t.gallery.resetFilters}</button>
-      {/if}
-    </div>
-
-    <div class="grid gap-2">
-      <div class="grid gap-2 xl:grid-cols-[minmax(220px,1.6fr)_minmax(160px,1fr)_minmax(160px,1fr)_minmax(140px,0.9fr)]">
-        <input
-          type="search"
-          name="gallery_prompt"
-          value={filters.prompt}
-          placeholder={$t.gallery.filterPrompt}
-          autocomplete="off"
-          aria-label={$t.gallery.filterPrompt}
-          class="control-focus h-10 min-w-0 rounded-lg border border-stone-200 bg-white px-3 text-sm text-stone-900 shadow-sm shadow-stone-200/40 focus:border-emerald-500 dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-100 dark:shadow-none"
-          on:input={handleSearchInput}
-        />
-        <select value={filters.model} aria-label={$t.common.model} class="control-focus form-select min-w-0 border-stone-200 bg-white shadow-sm shadow-stone-200/40 focus:border-emerald-500 dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-100 dark:shadow-none" on:change={(event) => onFilter('model', event.currentTarget.value)}>
-          <option value="">{$t.gallery.allModels}</option>
-          {#each gallery?.filter_options.models || [] as model}
-            <option value={model}>{model}</option>
-          {/each}
-        </select>
-        <select value={filters.preset} aria-label={$t.common.preset} class="control-focus form-select min-w-0 border-stone-200 bg-white shadow-sm shadow-stone-200/40 focus:border-emerald-500 dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-100 dark:shadow-none" on:change={(event) => onFilter('preset', event.currentTarget.value)}>
-          <option value="">{$t.gallery.allPresets}</option>
-          {#each gallery?.filter_options.presets || [] as preset}
-            <option value={preset}>{preset}</option>
-          {/each}
-        </select>
-        <select value={filters.size} aria-label={$t.common.size} class="control-focus form-select min-w-0 border-stone-200 bg-white shadow-sm shadow-stone-200/40 focus:border-emerald-500 dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-100 dark:shadow-none" on:change={(event) => onFilter('size', event.currentTarget.value)}>
-          <option value="">{$t.gallery.allSizes}</option>
-          {#each gallery?.filter_options.sizes || [] as size}
-            <option value={size}>{size}</option>
-          {/each}
-        </select>
-      </div>
-
-      <div class="grid gap-2 xl:grid-cols-[minmax(0,1fr)_minmax(210px,0.45fr)]">
-        <div class="grid min-w-0 grid-cols-[1fr_auto_1fr] items-center rounded-lg border border-stone-200 bg-white shadow-sm shadow-stone-200/40 dark:border-zinc-800 dark:bg-zinc-900/80 dark:shadow-none" role="group" aria-label={$t.gallery.dateRange}>
-          <label class="sr-only" for="gallery-date-from">{$t.gallery.dateFrom}</label>
-          <input
-            id="gallery-date-from"
-            type="date"
-            value={filters.dateFrom}
-            aria-label={$t.gallery.dateFrom}
-            placeholder={$t.gallery.dateFrom}
-            class="control-focus h-10 min-w-0 border-0 bg-transparent px-2 text-sm text-stone-900 focus:border-emerald-500 dark:text-zinc-100"
-            on:change={(event) => onFilter('dateFrom', event.currentTarget.value)}
-          />
-          <span class="px-1 text-xs font-medium text-stone-400 dark:text-zinc-600" aria-hidden="true">-</span>
-          <label class="sr-only" for="gallery-date-to">{$t.gallery.dateTo}</label>
-          <input
-            id="gallery-date-to"
-            type="date"
-            value={filters.dateTo}
-            aria-label={$t.gallery.dateTo}
-            placeholder={$t.gallery.dateTo}
-            class="control-focus h-10 min-w-0 border-0 bg-transparent px-2 text-sm text-stone-900 focus:border-emerald-500 dark:text-zinc-100"
-            on:change={(event) => onFilter('dateTo', event.currentTarget.value)}
-          />
-        </div>
-
-        <label class={`control-focus flex h-10 min-w-0 items-center justify-center gap-2 rounded-lg border px-3 text-sm font-medium shadow-sm shadow-stone-200/40 transition-colors dark:shadow-none ${filters.favorite ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-700 dark:text-emerald-200' : 'border-stone-200 bg-white text-stone-700 hover:bg-stone-100 dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-300 dark:hover:bg-zinc-800'}`}>
-          <input type="checkbox" class="control-focus accent-emerald-500" checked={filters.favorite} on:change={(event) => onFilter('favorite', event.currentTarget.checked)} />
-          <span class="whitespace-nowrap">{$t.gallery.favorites}</span>
-        </label>
-      </div>
-    </div>
-  </div>
+  <GalleryFilterToolbar {gallery} {filters} {onFilter} onReset={onResetFilters} {collections} onManageCollections={() => (collectionsDialogOpen = true)} />
+  <CollectionsDialog open={collectionsDialogOpen} onClose={() => (collectionsDialogOpen = false)} />
+  {#if collectionsOverviewOpen}
+    <CollectionsOverview
+      {collections}
+      activeCollectionId={filters.collectionId || null}
+      onOpenCollection={(collectionId) => onFilter('collectionId', collectionId)}
+      onManageCollections={() => (collectionsDialogOpen = true)}
+    />
+  {/if}
 
   {#if selectionMode}
     <div class="mb-4 flex flex-col gap-3 rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-3 sm:flex-row sm:items-center sm:justify-between">
       <div class="text-xs font-medium text-emerald-800 dark:text-emerald-200">{selectionSummary}</div>
       <div class="flex flex-wrap gap-2">
-        <button type="button" class="control-focus rounded-lg border border-stone-300 px-2.5 py-2 text-xs text-stone-700 hover:bg-stone-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" on:click={onSelectPage}>{$t.gallery.selectAllPage}</button>
-        <button type="button" class="control-focus rounded-lg border border-stone-300 px-2.5 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" disabled={!gallery?.total || busy} on:click={onSelectFiltered}>{$t.gallery.selectFiltered}</button>
-        <button type="button" class="control-focus rounded-lg border border-stone-300 px-2.5 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" disabled={!hasSelection} on:click={onClearSelection}>{$t.gallery.clearSelection}</button>
-        <button type="button" class="control-focus rounded-lg border border-stone-300 px-2.5 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" disabled={!hasSelection || busy} on:click={onBatchDownload}>{operationStatus?.kind === 'download' ? $t.gallery.downloading : $t.gallery.downloadSelected}</button>
-        {#if canAiAnalyze}
-          <button type="button" class="control-focus rounded-lg border border-cyan-500/35 px-2.5 py-2 text-xs text-cyan-700 hover:bg-cyan-500/10 disabled:opacity-40 dark:text-cyan-200" disabled={!hasSelection || busy} on:click={onBatchAiAnalyze}>{operationStatus?.kind === 'ai_analyze' ? $t.gallery.aiAnalyzing : $t.gallery.aiAnalyzeSelected}</button>
+        <button type="button" class="control-focus rounded-lg border border-stone-300 px-2.5 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" disabled={selectedAllFiltered} onclick={galleryStore.selectPage}>{$t.gallery.selectAllPage}</button>
+        <button type="button" class="control-focus rounded-lg border border-stone-300 px-2.5 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" disabled={!gallery?.total || busy} onclick={galleryStore.selectFiltered}>{$t.gallery.selectFiltered}</button>
+        <button type="button" class="control-focus rounded-lg border border-stone-300 px-2.5 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" disabled={!hasSelection} onclick={galleryStore.clearSelection}>{selectedAllFiltered ? $t.gallery.exitFilteredSelection : $t.gallery.clearSelection}</button>
+        <button type="button" class="control-focus rounded-lg border border-stone-300 px-2.5 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" disabled={!hasSelection || busy} onclick={() => galleryStore.batchDownload(uiStore.showToast)}>{operationStatus?.kind === 'download' ? $t.gallery.downloading : $t.gallery.downloadSelected}</button>
+        {#if canNodeImageUpload}
+          <button type="button" class="control-focus rounded-lg border border-stone-300 px-2.5 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" disabled={!hasSelection || busy} onclick={onBatchNodeImageUpload}>
+            {operationStatus?.kind === 'nodeimage_upload' ? $t.gallery.uploadingToNodeImage : $t.gallery.uploadSelectedToNodeImage}
+          </button>
         {/if}
-        <button type="button" class="control-focus rounded-lg border border-stone-300 px-2.5 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" disabled={!hasSelection || busy} on:click={() => onBatchFavorite(true)}>{$t.gallery.favoriteSelected}</button>
-        <button type="button" class="control-focus rounded-lg border border-stone-300 px-2.5 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" disabled={!hasSelection || busy} on:click={() => onBatchFavorite(false)}>{$t.gallery.unfavoriteSelected}</button>
-        <button type="button" class="control-focus rounded-lg border border-red-500/40 px-2.5 py-2 text-xs text-red-300 hover:bg-red-500/10 disabled:opacity-40" disabled={!hasSelection || busy} on:click={onBatchDelete}>{$t.gallery.deleteSelected}</button>
+        <button
+          type="button"
+          class="control-focus rounded-lg border px-2.5 py-2 text-xs transition-colors {canAiAnalyze ? 'border-stone-300 text-stone-700 hover:bg-stone-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800' : 'cursor-not-allowed border-stone-300 bg-stone-100 text-stone-400 opacity-60 dark:border-zinc-700 dark:bg-zinc-800/50 dark:text-zinc-500'} disabled:cursor-not-allowed disabled:opacity-40"
+          disabled={!canAiAnalyze || !hasSelection || busy || selectedAllVisibleSvg}
+          title={!canAiAnalyze ? $t.aiAssistant.unavailable : undefined}
+          onclick={onBatchAiAnalyze}
+        >
+          {operationStatus?.kind === 'ai_analyze' ? $t.gallery.aiAnalyzing : $t.gallery.aiAnalyzeSelected}
+        </button>
+        {#if collections.length}
+          <select
+            class="form-select control-focus min-h-9 rounded-lg py-1.5 text-xs disabled:opacity-40"
+            aria-label={$t.collections.addSelected}
+            disabled={!hasSelection || busy}
+            value=""
+            onchange={(event) => {
+              const target = event.currentTarget;
+              const collectionId = target.value;
+              target.value = '';
+              if (collectionId) void addSelectionToCollection(collectionId);
+            }}
+          >
+            <option value="">{$t.collections.addSelected}</option>
+            {#each [...collections].sort((left, right) => Number(right.is_default) - Number(left.is_default)) as collection (collection.id)}
+              <option value={collection.id}>{collection.name}{collection.is_default ? ` · ${$t.collections.default}` : ''}</option>
+            {/each}
+          </select>
+        {/if}
+        {#if activeCollection}
+          <button type="button" class="control-focus rounded-lg border border-stone-300 px-2.5 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" disabled={!hasSelection || busy} onclick={() => void removeSelectionFromCollection()}>{$t.collections.removeSelected}</button>
+        {/if}
+        <button type="button" class="control-focus rounded-lg border border-stone-300 px-2.5 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" disabled={!hasSelection || busy} onclick={() => onBatchFavorite(true)}>{$t.gallery.favoriteSelected}</button>
+        <button type="button" class="control-focus rounded-lg border border-stone-300 px-2.5 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" disabled={!hasSelection || busy} onclick={() => onBatchFavorite(false)}>{$t.gallery.unfavoriteSelected}</button>
+        <button type="button" class="control-focus rounded-lg border border-red-500/40 px-2.5 py-2 text-xs text-red-700 hover:bg-red-500/10 disabled:opacity-40 dark:text-red-300" disabled={!hasSelection || busy} onclick={onBatchDelete}>{$t.gallery.deleteSelected}</button>
       </div>
     </div>
   {/if}
 
   {#if operationStatus}
-    <div class="mb-4 rounded-xl border border-sky-500/30 bg-sky-500/10 p-3" role="status" aria-live="polite">
+    <div class="mb-4 rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3" role="status" aria-live="polite">
       <div class="flex items-start justify-between gap-3">
         <div>
-          <p class="text-xs font-semibold text-sky-100">{operationStatus.label}</p>
-          <p class="mt-1 text-xs text-sky-200/80">{operationStatus.detail}</p>
+          <p class="text-xs font-semibold text-emerald-950 dark:text-emerald-100">{operationStatus.label}</p>
+          <p class="mt-1 text-xs text-emerald-800 dark:text-emerald-200/80">{operationStatus.detail}</p>
         </div>
-        <div class="text-xs text-sky-200">{operationStatus.progress === null ? $t.gallery.notInterruptible : `${operationStatus.progress}%`}</div>
+        <div class="flex shrink-0 items-center gap-2">
+          <div class="text-xs text-emerald-800 dark:text-emerald-200">{operationStatus.progress === null ? $t.gallery.notInterruptible : `${operationStatus.progress}%`}</div>
+          {#if operationStatus.cancel}
+            <button
+              type="button"
+              class="control-focus inline-flex min-h-9 items-center gap-1.5 rounded-md border border-emerald-700/40 px-2.5 py-1.5 text-xs font-medium text-emerald-900 hover:bg-emerald-500/10 disabled:cursor-wait disabled:opacity-50 dark:border-emerald-300/40 dark:text-emerald-100 dark:hover:bg-emerald-300/10"
+              disabled={operationStatus.cancelPending}
+              onclick={() => void operationStatus.cancel?.()}
+            >
+              <X class="h-3.5 w-3.5" aria-hidden="true" />
+              {$t.gallery.cancelOperation}
+            </button>
+          {/if}
+        </div>
       </div>
-      <div class="mt-3 h-1.5 overflow-hidden rounded-full bg-sky-950/70">
+      <div class="mt-3 h-1.5 overflow-hidden rounded-full bg-emerald-950/20 dark:bg-emerald-950/70">
         {#if operationStatus.progress === null}
-          <div class="h-full w-1/3 animate-pulse rounded-full bg-sky-300"></div>
+          <div class="progress-indeterminate h-full w-1/3 rounded-full bg-emerald-500 dark:bg-emerald-300"></div>
         {:else}
-          <div class="h-full rounded-full bg-sky-300 transition-[width]" style={`width: ${Number(operationStatus.progress) || 0}%`}></div>
+          <div class="h-full rounded-full bg-emerald-500 transition-[width] dark:bg-emerald-300" style={`width: ${Number(operationStatus.progress) || 0}%`}></div>
         {/if}
       </div>
     </div>
   {/if}
 
   {#if initialLoading}
-    <div class="grid gap-4 sm:grid-cols-2 md:gap-5 lg:grid-cols-3 lg:gap-4" aria-label={$t.gallery.loading}>
+    <div class="grid gap-3 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6" aria-label={$t.gallery.loading}>
       {#each skeletonCards as _}
         <div class="overflow-hidden rounded-xl border border-stone-200 bg-stone-100/90 dark:border-zinc-800 dark:bg-zinc-950/45">
           <div class="aspect-square animate-pulse bg-stone-200/80 dark:bg-zinc-800/60"></div>
           <div class="space-y-3 p-3">
-            <div class="h-4 w-5/6 animate-pulse rounded bg-stone-200 dark:bg-zinc-800/70"></div>
-            <div class="h-3 w-1/2 animate-pulse rounded bg-stone-200 dark:bg-zinc-800/60"></div>
+            <div class="h-4 w-5/6 animate-pulse rounded-sm bg-stone-200 dark:bg-zinc-800/70"></div>
+            <div class="h-3 w-1/2 animate-pulse rounded-sm bg-stone-200 dark:bg-zinc-800/60"></div>
             <div class="flex gap-2">
-              <div class="h-7 w-14 animate-pulse rounded bg-stone-200 dark:bg-zinc-800/60"></div>
-              <div class="h-7 w-16 animate-pulse rounded bg-stone-200 dark:bg-zinc-800/60"></div>
+              <div class="h-7 w-14 animate-pulse rounded-sm bg-stone-200 dark:bg-zinc-800/60"></div>
+              <div class="h-7 w-16 animate-pulse rounded-sm bg-stone-200 dark:bg-zinc-800/60"></div>
             </div>
           </div>
         </div>
@@ -390,22 +588,38 @@
   {:else}
     <div class="relative" aria-busy={loading}>
       {#if loading}
-        <div class="pointer-events-none absolute inset-0 z-10 rounded-xl bg-white/30 backdrop-blur-[1px] dark:bg-zinc-950/20">
+        <div class="gallery-loading-overlay pointer-events-none absolute inset-0 z-10 rounded-xl">
           <div class="absolute right-3 top-3 rounded-lg border border-stone-300 bg-white/90 px-3 py-2 text-xs text-stone-700 shadow-lg dark:border-zinc-700 dark:bg-zinc-950/90 dark:text-zinc-300">
             {$t.gallery.loading}
           </div>
         </div>
       {/if}
 
-      <div class={`grid gap-4 sm:grid-cols-2 md:gap-5 lg:grid-cols-3 lg:gap-4 ${loading ? 'opacity-70' : ''}`}>
+      <div
+        bind:this={gridElement}
+        role="group"
+        aria-label={$t.gallery.title}
+        class={`gallery-grid grid gap-3 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 ${loading ? 'opacity-70' : ''}`}
+        onpointerdown={handleGridPointerDown}
+        onclickcapture={handleGridClickCapture}
+      >
         {#each images as image, index (image.id)}
-          <article class={`gallery-card overflow-hidden rounded-xl border ${isImageSelected(image) ? 'border-emerald-400 bg-emerald-500/10' : 'border-stone-200 bg-white/85 dark:border-zinc-800 dark:bg-zinc-950/45'}`}>
+          <article data-image-id={image.id} class={`gallery-card overflow-hidden rounded-xl border ${isImageSelected(image) ? 'border-emerald-400 bg-emerald-500/10' : 'border-stone-200 bg-white/85 dark:border-zinc-800 dark:bg-zinc-950/45'}`}>
             <button
               type="button"
-              class="control-focus relative block aspect-square w-full bg-stone-100 dark:bg-zinc-950"
+              class="gallery-media-well control-focus relative block aspect-square w-full bg-stone-100 dark:bg-zinc-950"
+              style="touch-action: pan-y"
               aria-label={image.prompt}
               aria-pressed={selectionMode ? isImageSelected(image) : undefined}
-              on:click={() => handleImageClick(image)}
+              onmouseenter={() => { if (isGifMedia(image)) hoveredGifId = image.id; }}
+              onmouseleave={() => { if (hoveredGifId === image.id) hoveredGifId = null; }}
+              onfocusin={() => { if (isGifMedia(image)) focusedGifId = image.id; }}
+              onfocusout={() => { if (focusedGifId === image.id) focusedGifId = null; }}
+              onclick={(event) => handleImageClick(event, image)}
+              onpointerdown={handleCardSwipeDown}
+              onpointermove={(event) => handleCardSwipeMove(event, image)}
+              onpointerup={handleCardSwipeEnd}
+              onpointercancel={handleCardSwipeEnd}
             >
               {#if selectionMode}
                 <span class="absolute left-2 top-2 z-10 rounded-md bg-white/90 px-2 py-1 text-xs font-medium text-stone-800 dark:bg-zinc-950/80 dark:text-zinc-100">
@@ -413,44 +627,50 @@
                 </span>
                 <span class="sr-only">{isImageSelected(image) ? $t.gallery.selectedCount(1) : $t.gallery.select}</span>
               {/if}
+              {#if isGifMedia(image)}
+                <span class="gallery-gif-badge pointer-events-none absolute right-2 top-2 z-10 rounded-md bg-stone-950/75 px-1.5 py-0.5 text-xs font-semibold text-white shadow-xs">
+                  GIF
+                </span>
+              {/if}
               <picture class="block h-full w-full">
                 <img
+                  draggable="false"
                   src={galleryImageSrc(image)}
                   alt={image.prompt}
-                  class="h-full w-full object-cover"
-                  loading={index < EAGER_THUMB_COUNT ? 'eager' : 'lazy'}
-                  fetchpriority={index < EAGER_THUMB_COUNT ? 'high' : 'auto'}
+                  class="gallery-image preview-empty h-full w-full object-contain"
+                  loading={thumbnailLoading(index)}
+                  fetchpriority={thumbnailFetchPriority(index)}
                   decoding="async"
                   width={image.image_width || undefined}
                   height={image.image_height || undefined}
-                  on:load={() => handleThumbnailLoad(image)}
-                  on:error={(event) => handleThumbnailError(event, image)}
+                  onload={() => handleThumbnailLoad(image)}
+                  onerror={() => handleThumbnailError(image)}
                 />
               </picture>
             </button>
             <div class="space-y-2 p-2.5">
               <div class="min-w-0">
                 <p class="line-clamp-2 text-xs leading-5 text-stone-800 dark:text-zinc-200">{image.prompt}</p>
-                <p class="mt-1 truncate text-[11px] leading-4 text-stone-500 dark:text-zinc-500">{displayImageSize(image)} / {image.model || '-'}</p>
+                <p class="mt-1 truncate text-xs leading-4 text-stone-500 dark:text-zinc-500">{displayImageSize(image)} / {image.model || '-'}</p>
               </div>
-              <div class="grid grid-cols-6 gap-1">
+              <div class="gallery-card-actions grid grid-cols-4 gap-1">
                 <button
                   type="button"
                   class="gallery-icon-action control-focus border-emerald-500/40 text-emerald-700 hover:bg-emerald-500/10 dark:text-emerald-200"
                   aria-label={$t.common.usePrompt}
                   title={$t.common.usePrompt}
-                  on:click={(event) => handleGalleryAction(event, () => onUsePrompt(image))}
+                  onclick={(event) => handleGalleryAction(event, () => onUsePrompt(image))}
                 >
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4h10a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>
+                  <FileText aria-hidden="true" />
                 </button>
                 <button
                   type="button"
                   class="gallery-icon-action control-focus border-emerald-500/40 text-emerald-700 hover:bg-emerald-500/10 dark:text-emerald-200"
                   aria-label={$t.common.useAllParams}
                   title={$t.common.useAllParams}
-                  on:click={(event) => handleGalleryAction(event, () => onUseAll(image))}
+                  onclick={(event) => handleGalleryAction(event, () => onUseAll(image))}
                 >
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg>
+                  <SlidersHorizontal aria-hidden="true" />
                 </button>
                 <button
                   type="button"
@@ -458,69 +678,80 @@
                   aria-pressed={image.favorite}
                   aria-label={image.favorite ? $t.common.unfavorite : $t.common.favorite}
                   title={image.favorite ? $t.common.unfavorite : $t.common.favorite}
-                  on:click={(event) => handleGalleryAction(event, () => onFavorite(image))}
+                  onclick={(event) =>
+                    handleGalleryAction(event, () => {
+                      popFavorite(image);
+                      onFavorite(image);
+                    })}
                 >
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9L12 3Z"/></svg>
+                  <Star aria-hidden="true" class={poppedFavoriteId === image.id ? 'favorite-pop' : ''} />
                 </button>
+                {#if collections.length}
+                  <button
+                    type="button"
+                    class="gallery-icon-action control-focus border-stone-300 text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                    disabled={!defaultTarget}
+                    aria-label={defaultTarget ? $t.collections.addToDefault(defaultTarget.name) : $t.collections.noDefault}
+                    title={defaultTarget ? $t.collections.addToDefault(defaultTarget.name) : $t.collections.noDefault}
+                    onclick={(event) => handleGalleryAction(event, () => void addToDefaultCollection(image))}
+                  >
+                    <BookmarkPlus aria-hidden="true" />
+                  </button>
+                {/if}
                 <button
                   type="button"
                   class="gallery-icon-action control-focus border-stone-300 text-stone-700 hover:bg-stone-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                  disabled={/\.(svg|gif)$/i.test(image.filename)}
                   aria-label={$t.common.edit}
                   title={$t.common.edit}
-                  on:click={(event) => handleGalleryAction(event, () => onEdit(image))}
+                  onclick={(event) => handleGalleryAction(event, () => onEdit(image))}
                 >
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3Z"/><path d="m14 7 3 3"/></svg>
+                  <Pencil aria-hidden="true" />
                 </button>
                 <a
                   href={`/api/download/${encodeURIComponent(image.filename)}`}
                   class="gallery-icon-action control-focus border-stone-300 text-stone-700 hover:bg-stone-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
                   aria-label={$t.common.download}
                   title={$t.common.download}
-                  on:click|stopPropagation
+                  onclick={(event) => event.stopPropagation()}
                 >
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v10"/><path d="m8 10 4 4 4-4"/><path d="M5 20h14"/></svg>
+                  <Download aria-hidden="true" />
                 </a>
+                {#if canNodeImageUpload}
+                  <button
+                    type="button"
+                    class="gallery-icon-action control-focus border-stone-300 text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                    disabled={busy}
+                    aria-label={$t.gallery.uploadToNodeImage}
+                    title={$t.gallery.uploadToNodeImage}
+                    onclick={(event) => handleGalleryAction(event, () => onNodeImageUpload(image))}
+                  >
+                    <CloudUpload aria-hidden="true" />
+                  </button>
+                {/if}
                 <button
                   type="button"
-                  class="gallery-icon-action control-focus border-red-500/40 text-red-300 hover:bg-red-500/10"
+                  class="gallery-icon-action control-focus border-red-500/40 text-red-700 hover:bg-red-500/10 dark:text-red-300"
                   aria-label={$t.common.delete}
                   title={$t.common.delete}
-                  on:click={(event) => handleGalleryAction(event, () => onDelete(image))}
+                  onclick={(event) => handleGalleryAction(event, () => onDelete(image))}
                 >
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16"/><path d="M9 7V5h6v2"/><path d="M7 7l1 13h8l1-13"/><path d="M10 11v5M14 11v5"/></svg>
+                  <Trash2 aria-hidden="true" />
                 </button>
               </div>
             </div>
           </article>
         {/each}
       </div>
+      {#if bandRectState}
+        <div
+          class="pointer-events-none absolute z-20 rounded-sm border border-emerald-500/70 bg-emerald-500/10"
+          style={`left:${bandRectState.left}px;top:${bandRectState.top}px;width:${bandRectState.width}px;height:${bandRectState.height}px;`}
+          aria-hidden="true"
+        ></div>
+      {/if}
     </div>
 
-    <div class="mt-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-      <button type="button" disabled={loading || !gallery?.has_prev} class="control-focus rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" on:click={() => onPage(clampPage(currentPage - 1), 'prev')}>
-        {$t.gallery.previous}
-      </button>
-      <label class="flex items-center justify-center gap-2 text-xs text-stone-500 dark:text-zinc-500">
-        <span>{$t.gallery.pageInputPrefix}</span>
-        <input
-          type="number"
-          min="1"
-          max={totalPages}
-          inputmode="numeric"
-          value={pageInput}
-          disabled={loading}
-          aria-label={$t.gallery.jumpPageLabel}
-          title={$t.gallery.jumpPageHint(totalPages)}
-          class="control-focus h-9 w-16 rounded-lg border border-stone-200 bg-stone-50 px-2 text-center text-sm text-stone-900 focus:border-emerald-500 disabled:opacity-50 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-100"
-          on:input={(event) => (pageInput = event.currentTarget.value)}
-          on:keydown={handlePageInputKeydown}
-          on:blur={handlePageInputBlur}
-        />
-        <span>{$t.gallery.pageInputSuffix(totalPages)}</span>
-      </label>
-      <button type="button" disabled={loading || !gallery?.has_next} class="control-focus rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800" on:click={() => onPage(clampPage(currentPage + 1), 'next')}>
-        {$t.gallery.next}
-      </button>
-    </div>
+    <GalleryPagination hasNext={Boolean(gallery?.has_next)} {loading} onLoadMore={() => onLoadMore?.()} />
   {/if}
 </section>

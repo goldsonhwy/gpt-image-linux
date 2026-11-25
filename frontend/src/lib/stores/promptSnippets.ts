@@ -1,11 +1,6 @@
 import { writable } from 'svelte/store';
 import { apiFetch } from '$lib/api/client';
-import type {
-  PromptSnippet,
-  PromptSnippetCreateInput,
-  PromptSnippetListResponse,
-  PromptSnippetUpdateInput
-} from '$lib/api/types';
+import type { PromptSnippet, PromptSnippetCreateInput, PromptSnippetListResponse, PromptSnippetUpdateInput } from '$lib/api/types/snippets';
 
 export type PromptSnippetsState = {
   snippets: PromptSnippet[];
@@ -21,12 +16,17 @@ const initialPromptSnippetsState: PromptSnippetsState = {
   query: ''
 };
 
-function promptSnippetsUrl(query: string) {
-  const params = new URLSearchParams();
-  const normalizedQuery = query.trim();
-  if (normalizedQuery) params.set('query', normalizedQuery);
-  const suffix = params.toString();
-  return `/api/prompt-snippets${suffix ? `?${suffix}` : ''}`;
+function snippetMatchesQuery(snippet: PromptSnippet, query: string) {
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  if (!normalizedQuery) return true;
+  return snippet.title.toLocaleLowerCase().includes(normalizedQuery) || snippet.prompt.toLocaleLowerCase().includes(normalizedQuery);
+}
+
+function sortSnippets(snippets: PromptSnippet[]) {
+  return [...snippets].sort((left, right) => {
+    if (left.favorite !== right.favorite) return left.favorite ? -1 : 1;
+    return right.updated_at.localeCompare(left.updated_at);
+  });
 }
 
 function createPromptSnippetsStore() {
@@ -36,8 +36,12 @@ function createPromptSnippetsStore() {
     update((state) => ({ ...state, loading: true, query }));
     try {
       const response = await apiFetch<PromptSnippetListResponse>(
-        promptSnippetsUrl(query),
-        {},
+        '/api/prompt-snippets/search',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: query.trim() })
+        },
         'loading prompt snippets'
       );
       update((state) => ({
@@ -66,7 +70,9 @@ function createPromptSnippetsStore() {
       );
       update((state) => ({
         ...state,
-        snippets: [snippet, ...state.snippets.filter((item) => item.id !== snippet.id)],
+        snippets: snippetMatchesQuery(snippet, state.query)
+          ? sortSnippets([snippet, ...state.snippets.filter((item) => item.id !== snippet.id)])
+          : state.snippets,
         saving: false
       }));
       return snippet;
@@ -90,7 +96,9 @@ function createPromptSnippetsStore() {
       );
       update((state) => ({
         ...state,
-        snippets: state.snippets.map((item) => (item.id === snippet.id ? snippet : item)),
+        snippets: snippetMatchesQuery(snippet, state.query)
+          ? sortSnippets([snippet, ...state.snippets.filter((item) => item.id !== snippet.id)])
+          : state.snippets.filter((item) => item.id !== snippet.id),
         saving: false
       }));
       return snippet;

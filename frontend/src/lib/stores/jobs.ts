@@ -1,134 +1,21 @@
 import { get, writable } from 'svelte/store';
-import { apiFetch } from '$lib/api/client';
-import { openJsonEventSource } from '$lib/api/events';
-import { t } from '$lib/i18n';
-import { filenameFromImageUrl, jobFailureMessage } from '$lib/utils/format';
-import { isActiveJobStatus } from '$lib/utils/jobs';
-import type { GenerateJobResponse, GenerateJobStatus } from '$lib/api/types';
-import type { PreviewState } from '$lib/stores/preview';
+import {
+  cancelGenerateJob,
+  clearGenerateJobHistory,
+  fetchGenerateJobHistory
+} from '$lib/api/jobs';
+import { observeJobStatusChange } from '$lib/utils/completionNotifications';
+import type { GeneratePreviewEvent, GenerateJobStatus } from '$lib/api/types/jobs';
+import { createJobsFeedController } from './jobsFeed';
+import { HISTORY_PAGE_SIZE, initialJobsState, mergeHistoryJobs, sameJobList, sameStringSet, type JobsState } from './jobsState';
+import { createTrackedJobsController, type TrackJobOptions } from './trackedJobs';
 
-export type JobsState = {
-  jobs: GenerateJobStatus[];
-  historyJobs: GenerateJobStatus[];
-  historyLoading: boolean;
-  historyLoaded: boolean;
-  historyNeedsRefresh: boolean;
-  historyHasMore: boolean;
-  historyFailedOnly: boolean;
-  selectedIds: Set<string>;
-};
-
-const initialJobsState: JobsState = {
-  jobs: [],
-  historyJobs: [],
-  historyLoading: false,
-  historyLoaded: false,
-  historyNeedsRefresh: false,
-  historyHasMore: false,
-  historyFailedOnly: false,
-  selectedIds: new Set()
-};
-
-const HISTORY_PAGE_SIZE = 50;
-const HISTORY_CACHE_LIMIT = 500;
-
-function sameJobImage(
-  left: NonNullable<GenerateJobStatus['images']>[number],
-  right: NonNullable<GenerateJobStatus['images']>[number]
-) {
-  return (
-    left.image_id === right.image_id &&
-    left.image_url === right.image_url &&
-    left.filename === right.filename &&
-    left.image_width === right.image_width &&
-    left.image_height === right.image_height
-  );
-}
-
-function sameJobImages(left: GenerateJobStatus['images'], right: GenerateJobStatus['images']) {
-  const leftImages = left || [];
-  const rightImages = right || [];
-  if (leftImages.length !== rightImages.length) return false;
-  for (let index = 0; index < leftImages.length; index += 1) {
-    const leftImage = leftImages[index];
-    const rightImage = rightImages[index];
-    if (!rightImage || !sameJobImage(leftImage, rightImage)) return false;
-  }
-  return true;
-}
-
-function sameStageTimings(left: GenerateJobStatus['stage_timings'], right: GenerateJobStatus['stage_timings']) {
-  const leftTimings = left || {};
-  const rightTimings = right || {};
-  const leftKeys = Object.keys(leftTimings);
-  const rightKeys = Object.keys(rightTimings);
-  if (leftKeys.length !== rightKeys.length) return false;
-  for (const key of leftKeys) {
-    if (leftTimings[key] !== rightTimings[key]) return false;
-  }
-  return true;
-}
-
-function sameJob(left: GenerateJobStatus, right: GenerateJobStatus) {
-  return (
-    left.job_id === right.job_id &&
-    left.status === right.status &&
-    left.stage === right.stage &&
-    left.message === right.message &&
-    left.operation === right.operation &&
-    left.updated_at === right.updated_at &&
-    left.completed_at === right.completed_at &&
-    left.image_id === right.image_id &&
-    left.image_url === right.image_url &&
-    left.prompt === right.prompt &&
-    left.size === right.size &&
-    left.model === right.model &&
-    left.duration === right.duration &&
-    left.error === right.error &&
-    sameJobImages(left.images, right.images) &&
-    sameStageTimings(left.stage_timings, right.stage_timings)
-  );
-}
-
-function sameJobList(left: GenerateJobStatus[], right: GenerateJobStatus[]) {
-  if (left.length !== right.length) return false;
-  for (let index = 0; index < left.length; index += 1) {
-    const current = left[index];
-    const next = right[index];
-    if (!next || !sameJob(current, next)) return false;
-  }
-  return true;
-}
-
-function sameStringSet(left: Set<string>, right: Set<string>) {
-  if (left.size !== right.size) return false;
-  for (const value of left) {
-    if (!right.has(value)) return false;
-  }
-  return true;
-}
-
-function mergeHistoryJobs(currentJobs: GenerateJobStatus[], nextJobs: GenerateJobStatus[]) {
-  const merged: GenerateJobStatus[] = [];
-  const seen = new Set<string>();
-  for (const job of [...currentJobs, ...nextJobs]) {
-    if (seen.has(job.job_id)) continue;
-    seen.add(job.job_id);
-    merged.push(job);
-    if (merged.length >= HISTORY_CACHE_LIMIT) break;
-  }
-  return merged;
-}
+export type { JobsState } from './jobsState';
 
 function createJobsStore() {
   const { subscribe, update } = writable<JobsState>(initialJobsState);
   let state = initialJobsState;
-  let jobsSource: EventSource | null = null;
-  let jobsPollingTimer: ReturnType<typeof setInterval> | null = null;
-  let jobsFeedHealthy = false;
-  let activeJobSource: EventSource | null = null;
-  let activeJobPollingTimer: ReturnType<typeof setTimeout> | null = null;
-  let trackedJobId: string | null = null;
+  const trackedJobs = createTrackedJobsController();
   let historyRequestSeq = 0;
 
   subscribe((value) => {
@@ -136,6 +23,11 @@ function createJobsStore() {
   });
 
   function applyActiveJobs(jobs: GenerateJobStatus[]) {
+    // Observe every status sighting for completion notifications; the first
+    // snapshot only primes the tracking (see observeJobStatusChange).
+    jobs.forEach((job) => observeJobStatusChange(job));
+    // Every tracked job (not just one) converges from an accepted snapshot.
+    jobs.forEach((job) => trackedJobs.applyFromFeed(job));
     const activeIds = new Set(jobs.map((job) => job.job_id));
     const selectedIds = new Set([...state.selectedIds].filter((id) => activeIds.has(id)));
     update((current) => {
@@ -144,14 +36,25 @@ function createJobsStore() {
     });
   }
 
-  async function loadJobs() {
-    try {
-      const jobs = await apiFetch<GenerateJobStatus[]>('/api/generate/jobs', {}, 'loading jobs');
-      applyActiveJobs(jobs);
-    } catch {
-      // Keep the last successful snapshot on transient failures.
+  const jobsFeed = createJobsFeedController({
+    onSnapshot: applyActiveJobs,
+    onJob: (job) => {
+      // Global events include jobs this tab never tracked.
+      observeJobStatusChange(job);
+      trackedJobs.applyFromFeed(job);
+    },
+    onVisible: () => {
+      trackedJobs.resumePolling();
+    },
+    onHealthy: () => {
+      trackedJobs.onFeedHealthy();
+    },
+    onUnhealthy: () => {
+      trackedJobs.onFeedUnhealthy();
     }
-  }
+  });
+  const loadJobs = jobsFeed.load;
+  const startJobsEvents = jobsFeed.startEvents;
 
   async function loadJobHistory(options: { append?: boolean; failedOnly?: boolean } = {}) {
     if (state.historyLoading) return;
@@ -176,7 +79,7 @@ function createJobsStore() {
         params.set('before_job_id', cursorJob.job_id);
       }
       if (failedOnly) params.set('failed_only', 'true');
-      const historyJobs = await apiFetch<GenerateJobStatus[]>(`/api/generate/jobs?${params.toString()}`, {}, 'loading job history');
+      const historyJobs = await fetchGenerateJobHistory(params);
       if (seq !== historyRequestSeq) return;
       update((current) => {
         const mergedJobs = append ? mergeHistoryJobs(current.historyJobs, historyJobs) : historyJobs;
@@ -236,7 +139,7 @@ function createJobsStore() {
   }
 
   function shouldRefreshJobsAfterSubmit() {
-    return !jobsFeedHealthy;
+    return !jobsFeed.healthy;
   }
 
   async function clearJobHistory() {
@@ -247,7 +150,7 @@ function createJobsStore() {
       historyNeedsRefresh: false
     }));
     try {
-      await apiFetch('/api/generate/jobs/history', { method: 'DELETE' }, 'clearing job history');
+      await clearGenerateJobHistory();
       if (seq !== historyRequestSeq) return;
       update((current) => ({
         ...current,
@@ -261,39 +164,6 @@ function createJobsStore() {
       if (seq === historyRequestSeq) update((current) => ({ ...current, historyLoading: false }));
       throw error;
     }
-  }
-
-  function startJobsPolling() {
-    if (jobsPollingTimer) return;
-    void loadJobs();
-    jobsPollingTimer = setInterval(() => {
-      void loadJobs();
-    }, 5000);
-  }
-
-  function stopJobsPolling() {
-    if (jobsPollingTimer) clearInterval(jobsPollingTimer);
-    jobsPollingTimer = null;
-  }
-
-  function startJobsEvents() {
-    jobsSource?.close();
-    jobsSource = openJsonEventSource<GenerateJobStatus[]>('/api/generate/jobs/events', {
-      onEvent: ({ data }) => {
-        stopJobsPolling();
-        jobsFeedHealthy = true;
-        if (Array.isArray(data)) applyActiveJobs(data);
-      },
-      onNetworkError: () => {
-        jobsFeedHealthy = false;
-        startJobsPolling();
-      },
-      onError: () => {
-        jobsFeedHealthy = false;
-        startJobsPolling();
-      }
-    });
-    jobsFeedHealthy = true;
   }
 
   function toggleSelection(jobId: string) {
@@ -311,9 +181,7 @@ function createJobsStore() {
   async function cancelSelected() {
     const ids = [...state.selectedIds];
     await Promise.all(
-      ids.map((jobId) =>
-        apiFetch(`/api/generate/${encodeURIComponent(jobId)}`, { method: 'DELETE' }, 'cancelling job').catch(() => null)
-      )
+      ids.map((jobId) => cancelGenerateJob(jobId).catch(() => null))
     );
     update((current) => ({ ...current, selectedIds: new Set() }));
     await loadJobs();
@@ -322,112 +190,41 @@ function createJobsStore() {
 
   function trackJob(
     jobId: string,
-    updatePreviewFromJob: (job: GenerateJobStatus) => Promise<void>,
-    setPreviewError: (message: string) => void
+    updatePreviewFromJob: (job: GenerateJobStatus) => void | Promise<void>,
+    setPreviewError: (message: string) => void,
+    onPreview?: (event: GeneratePreviewEvent) => void,
+    options: Omit<TrackJobOptions, 'feedHealthy'> = {}
   ) {
     if (!jobId) return;
-    let terminal = false;
-    closeActiveJobSource();
-    trackedJobId = jobId;
-    activeJobSource = openJsonEventSource<GenerateJobStatus>(`/api/generate/${encodeURIComponent(jobId)}/events`, {
-      onEvent: ({ data }) => {
-        if (trackedJobId !== jobId) return;
-        void updatePreviewFromJob(data);
-        if (!isActiveJobStatus(data.status)) {
-          terminal = true;
-          closeActiveJobSource();
-        }
+    jobsFeed.activate();
+    // Tracking is per job: a new job never closes an in-flight job's stream.
+    trackedJobs.track(
+      jobId,
+      {
+        onJob: updatePreviewFromJob,
+        onError: setPreviewError,
+        onPreview
       },
-      onNetworkError: () => {
-        if (!terminal && trackedJobId === jobId) void pollJob(jobId, updatePreviewFromJob, setPreviewError);
-      },
-      onError: () => {
-        closeActiveJobEventSource();
-        if (!terminal && trackedJobId === jobId) void pollJob(jobId, updatePreviewFromJob, setPreviewError);
+      {
+        ...options,
+        feedHealthy: () => jobsFeed.healthy
       }
-    });
+    );
   }
 
-  async function pollJob(
-    jobId: string,
-    updatePreviewFromJob: (job: GenerateJobStatus) => Promise<void>,
-    setPreviewError: (message: string) => void
-  ) {
-    if (trackedJobId !== jobId) return;
-    clearActiveJobPollingTimer();
-    try {
-      const job = await apiFetch<GenerateJobStatus>(`/api/generate/${encodeURIComponent(jobId)}`, {}, 'loading job');
-      if (trackedJobId !== jobId) return;
-      await updatePreviewFromJob(job);
-      if (trackedJobId !== jobId) return;
-      if (isActiveJobStatus(job.status)) {
-        activeJobPollingTimer = setTimeout(() => {
-          activeJobPollingTimer = null;
-          if (trackedJobId === jobId) void pollJob(jobId, updatePreviewFromJob, setPreviewError);
-        }, 1200);
-      } else {
-        closeActiveJobSource();
-      }
-    } catch (error) {
-      if (trackedJobId !== jobId) return;
-      setPreviewError(error instanceof Error ? error.message : get(t).messages.jobLoadFailed);
-      closeActiveJobSource();
-    }
+  /** Stop tracking one job (its own resources only). */
+  function untrackJob(jobId: string) {
+    trackedJobs.release(jobId);
   }
 
-  function makeQueuedPreview(currentPrompt: string, operation: NonNullable<GenerateJobResponse['operation']>): PreviewState {
-    closeActiveJobSource();
-    return {
-      loading: true,
-      error: '',
-      imageUrl: '',
-      filename: '',
-      prompt: currentPrompt,
-      job: {
-        job_id: '',
-        status: 'queued',
-        stage: 'queued',
-        message: operation === 'edit' ? get(t).messages.queuedEdit : get(t).messages.queuedGeneration,
-        operation
-      }
-    };
-  }
-
-  function previewFromJob(job: GenerateJobStatus, preview: PreviewState): PreviewState {
-    const primaryImage = job.images?.[0];
-    const image = primaryImage?.image_url || job.image_url || '';
-    return {
-      loading: isActiveJobStatus(job.status),
-      error: jobFailureMessage(job, get(t).messages.jobFailed),
-      job,
-      imageUrl: image || preview.imageUrl,
-      filename: primaryImage?.filename || (image ? filenameFromImageUrl(image) : preview.filename),
-      prompt: job.prompt || preview.prompt
-    };
-  }
-
-  function closeActiveJobEventSource() {
-    activeJobSource?.close();
-    activeJobSource = null;
-  }
-
-  function clearActiveJobPollingTimer() {
-    if (activeJobPollingTimer) clearTimeout(activeJobPollingTimer);
-    activeJobPollingTimer = null;
-  }
-
+  /** Stop tracking every job: clear, group replacement and cleanup. */
   function closeActiveJobSource() {
-    closeActiveJobEventSource();
-    clearActiveJobPollingTimer();
-    trackedJobId = null;
+    trackedJobs.releaseAll();
   }
 
   function cleanup() {
-    closeActiveJobSource();
-    jobsSource?.close();
-    jobsSource = null;
-    stopJobsPolling();
-    jobsFeedHealthy = false;
+    jobsFeed.dispose();
+    trackedJobs.releaseAll();
     historyRequestSeq += 1;
   }
 
@@ -446,8 +243,7 @@ function createJobsStore() {
     toggleAll,
     cancelSelected,
     trackJob,
-    makeQueuedPreview,
-    previewFromJob,
+    untrackJob,
     closeActiveJobSource,
     cleanup
   };

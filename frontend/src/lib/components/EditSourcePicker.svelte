@@ -1,12 +1,43 @@
 <script lang="ts">
+  import BookmarkPlus from 'lucide-svelte/icons/bookmark-plus';
+  import Brush from 'lucide-svelte/icons/brush';
+  import Package from 'lucide-svelte/icons/package';
+  import Upload from 'lucide-svelte/icons/upload';
+  import X from 'lucide-svelte/icons/x';
   import { t } from '$lib/i18n';
+  import { revertThumbnailToOriginal } from '$lib/utils/format';
+  import { MAX_EDIT_SOURCE_IMAGES, type EditMaskOrigin } from '$lib/stores/editSource';
 
-  export let sources: { id: string; label: string; kind: 'upload' | 'gallery' }[] = [];
+  export let sources: {
+    id: string;
+    label: string;
+    previewUrl: string;
+    kind: 'upload' | 'gallery' | 'gallery_reference';
+    imageId?: string;
+    isPrimary?: boolean;
+    maskCoverage?: number | null;
+    maskOrigin?: EditMaskOrigin | null;
+  }[] = [];
   export let onChange: (event: Event) => void = () => {};
+  export let onDropFiles: (files: File[]) => void = () => {};
   export let onPreview: (sourceId: string) => void = () => {};
+  export let onRemove: (sourceId: string) => void = () => {};
   export let onClear: () => void = () => {};
+  export let onEditMask: (sourceId: string) => void = () => {};
+  export let onSaveRefToCollection: (sourceId: string, imageId?: string) => void = () => {};
+  export let onRemoveMask: () => void = () => {};
+  export let onOpenAssetPack: (() => void) | undefined = undefined;
+  export let maskSupported = true;
+  export let pasteBack = true;
+  export let onPasteBackChange: (enabled: boolean) => void = () => {};
+
+  function handleThumbnailError(event: Event) {
+    revertThumbnailToOriginal(event.currentTarget as HTMLImageElement);
+  }
 
   let input: HTMLInputElement;
+  let dragDepth = 0;
+  let isDraggingFiles = false;
 
   export function openPicker() {
     input?.click();
@@ -15,9 +46,82 @@
   export function reset() {
     if (input) input.value = '';
   }
+
+  function maskBadgeLabel(coverage: number) {
+    return $t.promptForm.maskBadge(`${(coverage * 100).toFixed(1)}%`);
+  }
+
+  function maskOriginLabel(origin: EditMaskOrigin) {
+    if (origin === 'uploaded') return $t.promptForm.maskOriginUploaded;
+    if (origin === 'restored') return $t.promptForm.maskOriginRestored;
+    return $t.promptForm.maskOriginPainted;
+  }
+
+  function hasFiles(event: DragEvent) {
+    return Boolean(event.dataTransfer?.files?.length) || Array.from(event.dataTransfer?.types || []).includes('Files');
+  }
+
+  function handleDragEnter(event: DragEvent) {
+    if (!hasFiles(event)) return;
+    event.preventDefault();
+    dragDepth += 1;
+    isDraggingFiles = true;
+  }
+
+  function handleDragOver(event: DragEvent) {
+    if (!hasFiles(event)) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+    isDraggingFiles = true;
+  }
+
+  function handleDragLeave(event: DragEvent) {
+    if (!hasFiles(event)) return;
+    event.preventDefault();
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0) isDraggingFiles = false;
+  }
+
+  function handleDrop(event: DragEvent) {
+    if (!hasFiles(event)) return;
+    event.preventDefault();
+    dragDepth = 0;
+    isDraggingFiles = false;
+    const files = Array.from(event.dataTransfer?.files || []);
+    if (files.length) onDropFiles(files);
+  }
 </script>
 
-<div class="min-w-0">
+<div>
+  <div class="mb-1.5 flex items-center justify-between gap-2">
+    <p class="text-xs font-medium text-stone-600 dark:text-zinc-400">
+      {$t.promptForm.editSourceDropLabel}
+    </p>
+    {#if onOpenAssetPack}
+      <button
+        type="button"
+        class="control-focus inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-medium text-emerald-700 hover:bg-emerald-500/10 dark:text-emerald-400 dark:hover:bg-emerald-500/15"
+        on:click={onOpenAssetPack}
+      >
+        <Package size={13} strokeWidth={2} aria-hidden="true" />
+        <span>{$t.collections.addFromAssetPack}</span>
+      </button>
+    {/if}
+  </div>
+  <div
+    class={`min-w-0 rounded-xl border-2 border-dashed p-3 transition-all ${
+      isDraggingFiles
+        ? 'cursor-copy border-emerald-500 bg-emerald-500/10 shadow-inner'
+        : 'border-stone-300/90 bg-stone-50/50 hover:border-stone-400 dark:border-zinc-800 dark:bg-zinc-950/30 dark:hover:border-zinc-700'
+    }`}
+    data-dragging={isDraggingFiles}
+    role="group"
+    aria-label={$t.promptForm.editSourceDropLabel}
+    on:dragenter={handleDragEnter}
+    on:dragover={handleDragOver}
+    on:dragleave={handleDragLeave}
+    on:drop={handleDrop}
+  >
   <input
     bind:this={input}
     type="file"
@@ -29,31 +133,138 @@
   />
   <button
     type="button"
-    class="control-focus rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800"
+    class="control-focus flex min-h-[58px] w-full items-center justify-center gap-3.5 rounded-lg px-3 py-2 text-left transition-colors hover:bg-stone-100/80 dark:hover:bg-zinc-900/80"
     on:click={openPicker}
   >
-    {$t.promptForm.uploadEditImage}
+    <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-stone-200 bg-white text-stone-600 shadow-xs dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300" aria-hidden="true">
+      <Upload size={18} strokeWidth={1.9} />
+    </span>
+    <span class="min-w-0">
+      <span class="block text-sm font-medium text-stone-800 dark:text-zinc-200">
+        {isDraggingFiles ? $t.promptForm.editSourceDropActive : $t.promptForm.uploadEditImage}
+      </span>
+      <span class="mt-0.5 block text-xs text-stone-500 dark:text-zinc-400">
+        {$t.promptForm.editSourceDropHint}
+      </span>
+    </span>
   </button>
   {#if sources.length}
-    <button
-      type="button"
-      class="control-focus ml-2 rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800"
-      aria-label={$t.promptForm.clearEditSources}
-      on:click={onClear}
-    >
-      {$t.common.clear}
-    </button>
-    <div class="mt-2 flex max-w-full flex-wrap gap-2">
-      {#each sources as source (source.id)}
-        <button
-          type="button"
-          class="control-focus max-w-[220px] truncate rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1.5 text-left text-xs font-medium text-emerald-200 hover:bg-emerald-500/15"
-          title={$t.promptForm.previewEditLabel(source.label)}
-          on:click={() => onPreview(source.id)}
-        >
-          {source.kind === 'gallery' ? $t.promptForm.gallerySourceBadge : $t.promptForm.uploadSourceBadge} · {source.label}
-        </button>
-      {/each}
+    <div class="mt-3 flex min-h-10 items-center justify-between gap-3 border-t border-stone-200/80 pt-2.5 dark:border-zinc-800/80">
+      <p class="min-w-0 text-xs font-medium text-stone-600 dark:text-zinc-400" aria-live="polite">
+        {$t.promptForm.editSourceCount(sources.length, MAX_EDIT_SOURCE_IMAGES)}
+      </p>
+      <button
+        type="button"
+        class="control-focus shrink-0 rounded-md px-2.5 py-1 text-xs font-medium text-red-600 hover:bg-red-50 hover:text-red-700 dark:text-red-400 dark:hover:bg-red-950/40"
+        aria-label={$t.promptForm.clearReference}
+        title={$t.promptForm.clearReference}
+        on:click={onClear}
+      >
+        {$t.promptForm.clearReference}
+      </button>
     </div>
+    <ul class="mt-2 grid grid-cols-2 gap-2.5" aria-label={$t.promptForm.selectedEditSources}>
+      {#each sources as source (source.id)}
+        <li class="relative min-w-0 overflow-hidden rounded-lg border border-stone-200 bg-white shadow-xs dark:border-zinc-800 dark:bg-zinc-900" data-source-id={source.id} data-source-kind={source.kind}>
+          <button
+            type="button"
+            class="control-focus flex w-full min-w-0 flex-col gap-1.5 rounded-lg p-1.5 text-left transition-colors hover:bg-stone-50 dark:hover:bg-zinc-800/80"
+            aria-label={$t.promptForm.previewEditLabel(source.label)}
+            title={$t.promptForm.previewEditLabel(source.label)}
+            on:click={() => onPreview(source.id)}
+          >
+            <img src={source.previewUrl} alt={source.label} class="h-24 w-full rounded-md object-contain ring-1 ring-black/5 dark:ring-white/10" on:error={handleThumbnailError} />
+            <span class="flex items-center gap-1.5">
+              <span class="min-w-0 flex-1 truncate text-xs font-medium text-stone-800 dark:text-zinc-200" title={source.label}>{source.label}</span>
+              <span class="inline-block shrink-0 rounded-sm bg-stone-100 px-1.5 py-0.5 text-[10px] font-medium text-stone-600 dark:bg-zinc-800 dark:text-zinc-400">
+                {source.kind === 'upload' ? $t.promptForm.uploadSourceBadge : $t.promptForm.gallerySourceBadge}
+              </span>
+              {#if source.isPrimary}
+                <span class="inline-block shrink-0 rounded-sm bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700 dark:text-emerald-300">
+                  {$t.promptForm.primarySourceBadge}
+                </span>
+              {/if}
+            </span>
+          </button>
+          {#if maskSupported}
+            <div class="flex flex-wrap items-center gap-1 border-t border-stone-200/80 px-1.5 py-1 dark:border-zinc-800/80">
+            {#if source.isPrimary}
+              <button
+                type="button"
+                class={`control-focus flex min-h-7 shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-medium transition-colors ${
+                  source.maskCoverage != null
+                    ? 'bg-emerald-500/10 text-emerald-700 hover:bg-emerald-500/20 dark:text-emerald-300'
+                    : 'text-stone-600 hover:bg-stone-200/60 hover:text-stone-950 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100'
+                }`}
+                aria-label={$t.promptForm.maskEditLabel(source.label)}
+                title={source.maskCoverage != null ? maskBadgeLabel(source.maskCoverage) : $t.promptForm.maskEditLabel(source.label)}
+                on:click={() => onEditMask(source.id)}
+              >
+                <Brush size={12} strokeWidth={2} aria-hidden="true" />
+                <span class="truncate">
+                  {source.maskCoverage != null ? maskBadgeLabel(source.maskCoverage) : $t.promptForm.editMask}
+                </span>
+              </button>
+              <button
+                type="button"
+                class="control-focus flex min-h-7 shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-medium text-stone-600 hover:bg-stone-200/60 hover:text-stone-950 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+                aria-label={$t.promptForm.saveRefToCollection}
+                title={$t.promptForm.saveRefToCollection}
+                on:click={() => onSaveRefToCollection(source.id, source.imageId)}
+              >
+                <BookmarkPlus size={12} strokeWidth={2} aria-hidden="true" />
+                <span class="truncate">{$t.promptForm.saveRefToCollection}</span>
+              </button>
+              {#if source.maskCoverage != null && source.maskOrigin}
+                <span class="shrink-0 rounded-sm bg-stone-100 px-1.5 py-0.5 text-[10px] font-medium text-stone-500 dark:bg-zinc-800 dark:text-zinc-400">
+                  {maskOriginLabel(source.maskOrigin)}
+                </span>
+              {/if}
+              {#if source.maskCoverage != null}
+                <label class="flex shrink-0 items-center gap-1 text-[10px] text-stone-600 dark:text-zinc-400" title={$t.promptForm.pasteBackHint}>
+                  <input type="checkbox" class="control-focus accent-emerald-500" checked={pasteBack} on:change={(event) => onPasteBackChange(event.currentTarget.checked)} />
+                  {$t.promptForm.pasteBack}
+                </label>
+              {/if}
+              {#if source.maskCoverage != null}
+                <button
+                  type="button"
+                  class="control-focus ml-auto shrink-0 rounded-md px-1.5 py-0.5 text-[10px] font-medium text-stone-500 hover:bg-red-50 hover:text-red-600 dark:text-zinc-500 dark:hover:bg-red-950/40 dark:hover:text-red-400"
+                  aria-label={$t.promptForm.removeMask}
+                  title={$t.promptForm.removeMask}
+                  on:click={onRemoveMask}
+                >
+                  {$t.promptForm.removeMask}
+                </button>
+              {/if}
+            {:else}
+              <span title={$t.promptForm.maskOnlyPrimaryHint}>
+                <button
+                  type="button"
+                  class="flex min-h-7 cursor-not-allowed items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-medium text-stone-400 opacity-70 dark:text-zinc-600"
+                  disabled
+                  aria-label={$t.promptForm.maskOnlyPrimaryHint}
+                  title={$t.promptForm.maskOnlyPrimaryHint}
+                >
+                  <Brush size={12} strokeWidth={2} aria-hidden="true" />
+                  <span>{$t.promptForm.editMask}</span>
+                </button>
+              </span>
+            {/if}
+          </div>
+          {/if}
+          <button
+            type="button"
+            class="control-focus absolute right-1.5 top-1.5 flex h-8 w-8 items-center justify-center rounded-md text-stone-400 hover:bg-red-50 hover:text-red-600 dark:text-zinc-500 dark:hover:bg-red-950/40 dark:hover:text-red-400"
+            aria-label={$t.promptForm.removeEditLabel(source.label)}
+            title={$t.promptForm.removeEditLabel(source.label)}
+            on:click|stopPropagation={() => onRemove(source.id)}
+          >
+            <X size={16} strokeWidth={2} aria-hidden="true" />
+          </button>
+        </li>
+      {/each}
+    </ul>
   {/if}
+  </div>
 </div>

@@ -1,20 +1,24 @@
 import { get, writable } from 'svelte/store';
 import { apiFetch, setUnauthorizedHandler } from '$lib/api/client';
 import { t } from '$lib/i18n';
-import type { AccessStatus } from '$lib/api/types';
+import type { AccessStatus } from '$lib/api/types/access';
 
 export type AccessState = {
   authenticated: boolean;
   loading: boolean;
   gateVisible: boolean;
   error: string;
+  turnstileEnabled: boolean;
+  turnstileSiteKey: string;
 };
 
 const initialAccessState: AccessState = {
   authenticated: false,
   loading: false,
   gateVisible: false,
-  error: ''
+  error: '',
+  turnstileEnabled: false,
+  turnstileSiteKey: ''
 };
 
 function createAccessStore() {
@@ -32,6 +36,11 @@ function createAccessStore() {
   async function checkAccess(onAuthenticated: () => Promise<void>) {
     try {
       const data = await apiFetch<AccessStatus>('/api/access/status', {}, 'checking access');
+      update((state) => ({
+        ...state,
+        turnstileEnabled: data.turnstile_enabled === true && !!data.turnstile_site_key,
+        turnstileSiteKey: data.turnstile_enabled === true ? data.turnstile_site_key || '' : ''
+      }));
       if (data.authenticated) {
         setGateVisible(false);
         await onAuthenticated();
@@ -43,7 +52,11 @@ function createAccessStore() {
     }
   }
 
-  async function unlockAccess(accessKey: string, onAuthenticated: () => Promise<void>) {
+  async function unlockAccess(
+    accessKey: string,
+    turnstileToken: string,
+    onAuthenticated: () => Promise<void>
+  ) {
     update((state) => ({ ...state, loading: true, error: '' }));
     try {
       const data = await apiFetch<AccessStatus>(
@@ -51,7 +64,7 @@ function createAccessStore() {
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ access_key: accessKey })
+          body: JSON.stringify({ access_key: accessKey, turnstile_token: turnstileToken })
         },
         'unlocking access'
       );

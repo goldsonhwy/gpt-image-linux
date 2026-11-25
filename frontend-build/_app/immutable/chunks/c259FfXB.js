@@ -1,0 +1,1 @@
+import{s as e}from"./CGEWKYnn.js";import"./BXZjRUTB.js";function t(){let{subscribe:t,update:n,set:r}=e({image:null});return{subscribe:t,open(e){r({image:e})},setImage(e){r({image:e})},updateFavorite(e,t){n(n=>({image:n.image?.id===e?{...n.image,favorite:t}:n.image}))}}}var n=t();export{n as t};
