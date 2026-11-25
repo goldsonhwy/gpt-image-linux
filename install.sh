@@ -178,21 +178,27 @@ else
   DOMAIN="${DOMAIN#http://}"; DOMAIN="${DOMAIN#https://}"; DOMAIN="${DOMAIN%/}"
   ACCESS_KEY=""
   if [ -t 0 ]; then
-    read -r -p "访问密钥 ACCESS_KEY (回车=随机生成): " ACCESS_KEY || true
+    read -r -p "访问密钥 ACCESS_KEY (默认留空=首次进面板自行设置密码; 直接回车跳过): " ACCESS_KEY || true
   fi
-  [ -z "$ACCESS_KEY" ] && ACCESS_KEY="$(openssl rand -hex 16 2>/dev/null || head -c16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
   # 生成 .env (仅覆盖 compose 实际用到的关键项; 其余用镜像默认值)
-  cat > "$INSTALL_DIR/.env" <<EOF
-GRANIAN_PORT=${PORT}
-ACCESS_KEY=${ACCESS_KEY}
-DOMAIN=${DOMAIN}
-EOF
+  # 访问密码: 默认留空 -> 面板首次进入时【自行设置密码】(你的需求)
+  #          手动填了 -> 直接锁定该密码, 不再首次自设
+  {
+    echo "GRANIAN_PORT=${PORT}"
+    [ -n "$ACCESS_KEY" ] && echo "ACCESS_KEY=${ACCESS_KEY}" || echo "ACCESS_KEY="
+    echo "DOMAIN=${DOMAIN}"
+  } > "$INSTALL_DIR/.env"
   if [ -n "$DOMAIN" ]; then
     echo "PUBLIC_ORIGIN=https://$DOMAIN" >> "$INSTALL_DIR/.env"
     echo "ALLOWED_HOSTS=$DOMAIN,127.0.0.1:$PORT,localhost:$PORT" >> "$INSTALL_DIR/.env"
     log "已生成 .env (端口 $PORT, 域名 $DOMAIN -> HTTPS 反代)"
   else
     log "已生成 .env (端口 $PORT, 无域名 -> 仅 IP 直连)"
+  fi
+  if [ -n "$ACCESS_KEY" ]; then
+    log "已设访问密钥: ${ACCESS_KEY:0:4}... (登录面板用它)"
+  else
+    log "访问密钥留空 -> 首次打开面板时按提示自行设置密码"
   fi
 fi
 
@@ -341,9 +347,13 @@ if [ -n "$DOMAIN" ]; then
   printf '\033[1;36m备用直连:  http://%s:%s\033[0m\n' "$PUB_IP" "$PORT"
 fi
 printf '\033[1;32m本机:      http://127.0.0.1:%s\033[0m\n' "$PORT"
-printf '访问密钥:  %s\n' "$ACCESS_KEY"
+if [ -n "$ACCESS_KEY" ]; then
+  printf '访问密钥:  %s  (用它在面板登录)\n' "$ACCESS_KEY"
+else
+  printf '访问密钥:  (未设) -> 首次打开面板时按提示自行设置密码\n'
+fi
 printf '容器名:    %s   |   镜像: %s\n' "$SERVICE_NAME" "$IMAGE"
 printf '安装目录:  %s\n' "$INSTALL_DIR"
-printf '\033[1;36m提示: 用访问密钥登录。若被云防火墙拦截, 放行入方向 TCP 80/443 (有域名) 或 %s (直连)。\033[0m\n' "$PORT"
+printf '\033[1;36m提示: 首次进入面板会要求设置访问密码; 若被云防火墙拦截, 放行入方向 TCP 80/443 (有域名) 或 %s (直连)。\033[0m\n' "$PORT"
 printf '\033[1;34m============================================\033[0m\n'
 log "完成。"
