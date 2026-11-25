@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # GPT Image Panel — 一键卸载脚本 (配合 install.sh 使用)
-# 删掉 install.sh 装的东西: 容器/镜像/数据目录/.env/反代(caddy 站点)/装的系统包
+# 只删本程序 + 它产生的内容: 容器 / 镜像 / 数据目录(.env) / 给 caddy 加的站点配置
+# 不删 Docker 本身, 不删 caddy/nginx 反代程序 (只删本程序给它们加的配置)
 # 幂等, 可重复跑; 不影响其它程序; 删前列出将删什么, 输 y 确认 (DRY=1 只列不执行)。
 # 用法 (在装了它的那台机器上):
 #   curl -fsSL https://raw.githubusercontent.com/goldsonhwy/gpt-image-linux/main/uninstall.sh | bash
@@ -89,5 +90,5 @@ if [ "$DRY" != 1 ] && [ "$CONFIRM" = 1 ]; then
   echo "开始执行 ..."
 fi
 
-echo "已卸载。若想彻底移除 Docker 本身 (一般不需要, 可能装过别的), 可另跑:"
-echo "  apt-get remove -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin && apt-get autoremove -y"
+echo "已卸载本程序 (容器/镜像/数据目录/反代站点)。"
+echo "Docker 与 caddy/nginx 反代程序本身保留未删 (只删了本程序给它们加的配置)。"
