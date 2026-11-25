@@ -43,6 +43,12 @@ if [ "$need_docker" = 1 ]; then
     err "排查: 1) 服务器能否访问外网  2) 是否有代理需配置 http_proxy  3) 重试 curl -I https://download.docker.com"
     exit 1
   fi
+  # 下载后校验 key 文件非空且像 GPG key (防下到空文件/HTML 错误页导致后续验签假成功)
+  if [ ! -s /etc/apt/keyrings/docker.asc ] || ! grep -q "BEGIN PGP PUBLIC KEY BLOCK\|-----BEGIN PGP\|0x" /etc/apt/keyrings/docker.asc; then
+    err "下载到的 GPG key 文件异常 (原因: 空文件/被代理拦截返回了 HTML/格式不符)。"
+    err "排查: 手动 'curl -I https://download.docker.com/linux/$DIST/gpg' 看是否 200; 若走代理检查 http_proxy。"
+    exit 1
+  fi
   chmod a+r /etc/apt/keyrings/docker.asc
   # 同时生成 dearmor 版 .gpg (部分 apt/全新机只认二进制)
   gpg --dearmor -o /etc/apt/keyrings/docker.gpg /etc/apt/keyrings/docker.asc 2>/dev/null || true
