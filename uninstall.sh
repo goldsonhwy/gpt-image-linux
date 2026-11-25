@@ -8,7 +8,11 @@
 set -uo pipefail
 
 SERVICE_NAME="gpt-image-panel"
-IMAGE="ghcr.io/z1rconium/gpt-image-linux:v2.0.0"
+# 要删的镜像 (新版你的 + 旧版上游, 覆盖从旧版升级过来的残留)
+IMAGES=(
+  "ghcr.io/goldsonhwy/gpt-image-linux:v2.1.0"
+  "ghcr.io/z1rconium/gpt-image-linux:v2.0.0"
+)
 INSTALL_DIR="$HOME/gpt-image-panel"
 DRY="${DRY:-0}"          # DRY=1 只列出将删什么, 不执行
 CONFIRM="${CONFIRM:-1}"  # CONFIRM=0 跳过 y/N 确认
@@ -31,13 +35,15 @@ else
   echo "- 容器 $SERVICE_NAME: 不存在 (跳过)"
 fi
 
-# 2. 删镜像 (仅该 tag)
-if docker image ls --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -qx "$IMAGE"; then
-  echo "- 镜像 $IMAGE (将删除)"
-  run docker rmi "$IMAGE" 2>/dev/null || true
-else
-  echo "- 镜像 $IMAGE: 不存在 (跳过)"
-fi
+# 2. 删镜像 (新版你的 + 旧版上游)
+for IMG in "${IMAGES[@]}"; do
+  if docker image ls --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -qx "$IMG"; then
+    echo "- 镜像 $IMG (将删除)"
+    run docker rmi "$IMG" 2>/dev/null || true
+  else
+    echo "- 镜像 $IMG: 不存在 (跳过)"
+  fi
+done
 
 # 3. 数据目录 (.env / 图片 / 日志)
 if [ -d "$INSTALL_DIR" ]; then

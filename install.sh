@@ -17,7 +17,7 @@ set -euo pipefail
 # 任何未捕获错误: 打印中文原因后退出 (避免 set -e 静默终止, 让用户在 ssh 界面看懂卡在哪)
 trap 'rc=$?; echo; echo "\033[1;31m[部署中断]\033[0m 第 $LINENO 行出错 (退出码 $rc)。" >&2; echo "若属 GPG/NO_PUBKEY 类, 见上方提示; 否则查上方最近的 [错误]/[注意] 行。" >&2' ERR
 
-IMAGE="ghcr.io/z1rconium/gpt-image-linux:v2.0.0"
+IMAGE="ghcr.io/goldsonhwy/gpt-image-linux:v2.1.0"
 INSTALL_DIR="$HOME/gpt-image-panel"
 SERVICE_NAME="gpt-image-panel"
 
