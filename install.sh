@@ -128,7 +128,7 @@ else
   # 生成 .env (仅覆盖 compose 实际用到的关键项; 其余用镜像默认值)
   cat > "$INSTALL_DIR/.env" <<EOF
 GRANIAN_PORT=${PORT}
-ACCESS_KEY=***
+ACCESS_KEY=${ACCESS_KEY}
 DOMAIN=${DOMAIN}
 EOF
   if [ -n "$DOMAIN" ]; then
